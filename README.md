@@ -39,11 +39,11 @@ PowerPoint を保存してから、スライド番号とセクション名を確
 
 ```shell
 tkn-powerpoint-note inspect "C:\path\to\deck.pptx"
-tkn-powerpoint-note build "C:\path\to\deck.pptx" --output "C:\path\to\deck.pptx.md"
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --output "C:\path\to\deck.pptx.md"
 tkn-powerpoint-note verify "C:\path\to\deck.pptx.md"
 ```
 
-`build` は Markdown と、同じフォルダに根拠情報を保存するフォルダを作成します。
+`export` は Markdown と、同じフォルダに根拠情報を保存するフォルダを作成します。
 `--output` を省略すると、`~/.tkn/powerpoint_note/data/` の下へ、元ファイルのパスごとに分けて保存します。
 原本の PowerPoint は常に読み取り専用です。
 
@@ -55,10 +55,10 @@ tkn-powerpoint-note verify "C:\path\to\deck.pptx.md"
 ## 対象スライドを選び、context を生成する
 
 ```shell
-tkn-powerpoint-note build "C:\path\to\deck.pptx" --slides "2,5-8" --output "C:\path\to\selection.md"
-tkn-powerpoint-note build "C:\path\to\deck.pptx" --section "Architecture" --slides "1-20"
-tkn-powerpoint-note build "C:\path\to\deck.pptx" --slides "2-3" --context --dry-run
-tkn-powerpoint-note build "C:\path\to\deck.pptx" --slides "2-3" --context
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2,5-8" --output "C:\path\to\selection.md"
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --section "Architecture" --slides "1-20"
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2-3" --context --dry-run
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2-3" --context
 ```
 
 スライド番号は、ファイル内の並び順を 1 から数えた位置です。
@@ -80,7 +80,7 @@ tkn-powerpoint-note build "C:\path\to\deck.pptx" --slides "2-3" --context
 
 ## 更新と手書き部分の保護
 
-原本を保存した後、同じ `build` を再実行すると更新できます。
+原本を保存した後、同じ `export` を再実行すると更新できます。
 入力と生成条件が同一なら、既存の根拠を検証して再利用し、`unchanged` を返します。
 生成部分は今回の選択範囲で置き換わり、以前の別範囲を蓄積する方式ではありません。
 `--context` を付けずに再生成すると、以前のノートに AI の説明があっても、抽出のみの内容になります。
@@ -122,7 +122,7 @@ generation:
   prompt_profile: default-en
 ```
 
-一度だけ切り替える場合は `build FILE --prompt-profile default-en` を使います。
+一度だけ切り替える場合は `export FILE --prompt-profile default-en` を使います。
 通常の抽出でもプロファイルの表示文言とテンプレートを使います。原文の翻訳は行いません。
 
 旧設定を使っている場合は `schema_version` を `"2.0.0"` に変更し、
@@ -136,10 +136,12 @@ generation:
 | 目的 | コマンド |
 | --- | --- |
 | 選択スライド・セクション・図形数を確認する | `inspect FILE` |
-| 1 ファイルからノートを作成・更新する | `build FILE` |
+| 1 ファイルからノートを作成・更新する | `export FILE` |
 | 生成本文・根拠・原本のハッシュを検証する | `verify NOTE` |
 | 編集済み設定を保護して初期設定を作る | `config init` |
 | 有効な設定と、その値を決めた設定元を確認する | `config show` |
+
+0.3.0 ではコマンド名を `build` から `export` に変更しました。旧版の `build FILE` は `export FILE` に置き換えてください。
 
 詳細は `COMMAND --help` で確認できます。
 `--quiet` は進捗を省略し、`--verbose` は診断情報を追加します。同時指定はできません。

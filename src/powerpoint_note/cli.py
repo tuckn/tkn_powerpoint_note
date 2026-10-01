@@ -92,7 +92,7 @@ def make_parser() -> argparse.ArgumentParser:
     common(view)
     view.add_argument("source", type=Path)
     selectors(view)
-    create = subs.add_parser("build", help="Write a Markdown note and evidence; AI is opt-in.")
+    create = subs.add_parser("export", help="Export a Markdown note and evidence; AI is opt-in.")
     common(create)
     create.add_argument("source", type=Path)
     create.add_argument(

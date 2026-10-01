@@ -24,11 +24,12 @@ def run_cli(*args, cwd):
 
 def test_entrypoint_help_version_and_e2e(deck_path, tmp_path):
     help_result = run_cli("--help", cwd=tmp_path)
-    assert help_result.returncode == 0 and "build" in help_result.stdout
+    assert help_result.returncode == 0
+    assert "export" in help_result.stdout and "build" not in help_result.stdout
     version = run_cli("--version", cwd=tmp_path)
     assert version.returncode == 0 and version.stdout.strip() == __version__
     output = tmp_path / "result.md"
-    built = run_cli("build", deck_path, "--output", output, cwd=tmp_path)
+    built = run_cli("export", deck_path, "--output", output, cwd=tmp_path)
     assert built.returncode == 0, built.stderr
     assert json.loads(built.stdout)["status"] == "created"
     assert "[SUCCESS]" in built.stderr
@@ -40,7 +41,7 @@ def test_entrypoint_help_version_and_e2e(deck_path, tmp_path):
 def test_cli_config_show_readonly_and_error(tmp_path):
     show = run_cli("config", "show", cwd=tmp_path)
     assert show.returncode == 0 and json.loads(show.stdout)["effective_schema_version"] == "2.0.0"
-    bad = run_cli("build", "missing.pptx", cwd=tmp_path)
+    bad = run_cli("export", "missing.pptx", cwd=tmp_path)
     assert bad.returncode != 0 and json.loads(bad.stdout)["status"] == "failed"
     assert "Traceback" not in bad.stderr
 
@@ -54,10 +55,10 @@ def test_quiet_verbose_mutually_exclusive(tmp_path, args):
     assert json.loads(result.stdout)["status"] == "failed"
 
 
-def test_no_sources_or_sync_commands(tmp_path):
-    for command in ("pull", "push"):
-        result = run_cli(command, cwd=tmp_path)
-        assert result.returncode != 0
+def test_removed_build_and_unsupported_sync_commands(tmp_path):
+    for command in ("build", "pull", "push"):
+        result = run_cli(command, "--help", cwd=tmp_path)
+        assert result.returncode == 2
 
 
 def test_log_format_color_and_levels(monkeypatch):
@@ -93,13 +94,13 @@ def test_log_filtering_and_stderr(capsys):
 
 
 def test_cli_profile_selection_and_removed_language_option(deck_path, tmp_path):
-    help_result = run_cli("build", "--help", cwd=tmp_path)
+    help_result = run_cli("export", "--help", cwd=tmp_path)
     assert "--prompt-profile" in help_result.stdout and "--language" not in help_result.stdout
     output = tmp_path / "english.md"
     result = run_cli(
-        "build", deck_path, "--output", output, "--prompt-profile", "default-en", cwd=tmp_path
+        "export", deck_path, "--output", output, "--prompt-profile", "default-en", cwd=tmp_path
     )
     assert result.returncode == 0, result.stderr
     assert "Extracted content" in output.read_text("utf-8")
-    bad = run_cli("build", deck_path, "--language", "en", cwd=tmp_path)
+    bad = run_cli("export", deck_path, "--language", "en", cwd=tmp_path)
     assert bad.returncode == 2

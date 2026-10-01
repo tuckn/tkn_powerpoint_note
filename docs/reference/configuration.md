@@ -30,7 +30,7 @@ Credentials are owned by GenAI Bridge, not this configuration.
 | `generation.bridge_profile` | `codex-default` | Named connection in GenAI Bridge. CLI: `--bridge-profile`. |
 | `generation.prompt_profile` | `default-ja` | Complete content bundle. Built-ins: `default-ja` and `default-en`. CLI: `--prompt-profile`. |
 | `generation.profile_dirs` | `[]` | Optional parent directories containing complete content bundles; searched in list order before packaged profiles. |
-| `generation.max_slides` | `10` | Maximum selected slides per context build; CLI: `--max-slides`. A selection above it fails before AI. |
+| `generation.max_slides` | `10` | Maximum selected slides per context export; CLI: `--max-slides`. A selection above it fails before AI. |
 | `generation.max_input_chars` | `120000` | Maximum evidence JSON characters per slide or summary request; excludes image bytes and prompt instructions. Exceeding it fails; no text truncation. |
 | `generation.image_width` | `2400` | PNG width in pixels, 600–8000. Height preserves slide aspect ratio. |
 | `generation.render_timeout_seconds` | `180` | Timeout for the entire selected-slides rendering process. AI timeout comes from Bridge. |
@@ -98,7 +98,7 @@ Schemas must be self-contained: references, including remote references, are rej
 Reserved `powerpoint-note:` management markers belong to the application and cannot occur in profile resources.
 
 The selected bundle's name, version and all eight resource hashes participate in the build key.
-Changing any selected resource can cause regeneration, including new AI calls for a context build.
+Changing any selected resource can cause regeneration, including new AI calls for a context export.
 The note Frontmatter, evidence manifest and AI usage records retain bundle provenance.
 Editing an unused profile does not invalidate existing output. Reviewed/edited notes retain their normal protections.
 After changing packaged resources, reinstall a non-editable tool installation; custom profile directories are read directly.

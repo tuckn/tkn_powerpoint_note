@@ -59,14 +59,14 @@ The provider receives a schema without the unsupported `uniqueItems` constraint;
 These checks do not establish that every generated statement is accurate.
 Small text in raster images, videos, animations, OLE contents, font substitution and master/layout-only artwork
 are limitations. Master artwork appears in Office-rendered images but is not fully extracted by the XML reader.
-No OCR is performed in ordinary builds. No LibreOffice renderer is currently implemented.
+No OCR is performed in ordinary exports. No LibreOffice renderer is currently implemented.
 
 ## Notes and evidence
 
 A note has YAML Frontmatter, a single generated block between `powerpoint-note:begin/end` comments,
 and user-editable text outside that block.
 Unknown Frontmatter fields and text outside the markers survive updates.
-Source metadata and application-owned provenance fields refresh on successful builds.
+Source metadata and application-owned provenance fields refresh on successful exports.
 Edits inside the generated block and `reviewStatus: reviewed` are protected.
 `--force` backs up the old note and replaces protected generated content; it resets review status to unreviewed.
 Unrelated files, unsupported note schemas and a different source identity are never overwritten.
@@ -76,7 +76,7 @@ The sibling `<note>.assets/<build-key>/` folder contains:
 - `evidence.json`: filtered selected-slide evidence, deck metadata and source hash.
 - `body.md`: the exact generated Markdown block.
 - `manifest.json`: schema version, generator version, selected content profile provenance, source/build hashes and file checksums.
-- Context builds add slide PNGs, combined context JSON, per-call prompts/schemas, validated responses and usage records.
+- Context exports add slide PNGs, combined context JSON, per-call prompts/schemas, validated responses and usage records.
 
 Keep the note and its assets together. Moving both together preserves relative links.
 Source paths are absolute in Frontmatter; use `verify --source FILE` to verify after moving the source.
@@ -86,29 +86,29 @@ Source packages are not retained in successful bundles.
 Build keys include source bytes, selected evidence/settings, generator version, selected content profile identity/resource hashes and connection settings.
 Any source byte change invalidates the bundle, including changes to unselected slides.
 There is no per-slide incremental synchronization or accumulation across selections.
-Identical builds verify existing artifacts and return unchanged.
+Identical exports verify existing artifacts and return unchanged.
 `--refresh` creates a distinct context bundle with fresh calls.
 Failed runs retain available evidence under `failed-<id>/`; they do not replace the previous note or resume automatically.
-A crash may leave a `pending-<id>/` folder or note lock; confirm no build is running before removing a stale lock.
+A crash may leave a `pending-<id>/` folder or note lock; confirm no export is running before removing a stale lock.
 Completed unreferenced bundles can remain if publication was interrupted; they are not automatically deleted.
 
 Bundles are validated before publication. Markdown publication uses a same-directory temporary file and atomic replacement.
 Source and note content are rechecked immediately before publication.
-An application lock prevents competing builds to the same note.
+An application lock prevents competing exports to the same note.
 `verify` checks generated-body hash, bundle file hashes, note/bundle provenance and the current source hash.
 It reports semantic accuracy as not assessed.
 
 ## Dry-run, output and errors
 
-`build --dry-run` reads the input/config/current note, resolves selection and checks protection.
+`export --dry-run` reads the input/config/current note, resolves selection and checks protection.
 For context, it additionally checks local Office availability, linked resources, Bridge settings/executable and evidence limits.
 It does not open Office, authenticate, call a provider, make network requests, or write data/cache/report/state files.
 It reports planned counts and `planned_ai_calls`; actual `ai_calls` remains 0.
-Summary size is checked after slide analyses exist during a real build; that future size cannot be validated in advance.
+Summary size is checked after slide analyses exist during a real export; that future size cannot be validated in advance.
 
 `inspect`, `verify` and `config show` are read-only.
 `config init` writes only the selected config path and preserves existing edits.
-Normal builds write by default. Results use one JSON object on stdout and leveled progress on stderr.
+Normal exports write by default. Results use one JSON object on stdout and leveled progress on stderr.
 Exit codes: 0 success, 2 input/configuration/protection or expected I/O failure, 1 unexpected processing failure.
 `--help` and `--version` work without loading configuration.
 

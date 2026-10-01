@@ -232,7 +232,7 @@ def build(
         handle = lock.open("x", encoding="utf-8")
     except FileExistsError as exc:
         raise NoteError(
-            "A build lock already exists; check for a running build before removing the stale lock"
+            "A note lock already exists; check for a running export before removing the stale lock"
         ) from exc
     staging: Path | None = None
     try:
@@ -285,7 +285,7 @@ def build(
             atomic_write(staging / "manifest.json", json_text(manifest))
             validate_bundle(staging)
             if file_digest(source) != deck.source_sha256:
-                raise NoteError("Source changed during build; previous note preserved")
+                raise NoteError("Source changed during export; previous note preserved")
             staging.rename(folder)
             staging = None
         else:

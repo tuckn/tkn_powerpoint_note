@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+0.3.0:
+
+- Rename the public `build FILE` command to `export FILE`; use `export` in existing scripts. The old command is no longer accepted.
+- Keep export options, note updates, evidence reuse, dry-run and content protection unchanged.
+
 0.2.0:
 
 - Move prompts, structured response schemas, Markdown templates and display labels into complete `default-ja` / `default-en` content profiles.
