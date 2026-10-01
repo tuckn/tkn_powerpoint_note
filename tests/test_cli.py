@@ -40,7 +40,7 @@ def test_entrypoint_help_version_and_e2e(deck_path, tmp_path):
 
 def test_cli_config_show_readonly_and_error(tmp_path):
     show = run_cli("config", "show", cwd=tmp_path)
-    assert show.returncode == 0 and json.loads(show.stdout)["effective_schema_version"] == "2.0.0"
+    assert show.returncode == 0 and json.loads(show.stdout)["effective_schema_version"] == "2.1.0"
     bad = run_cli("export", "missing.pptx", cwd=tmp_path)
     assert bad.returncode != 0 and json.loads(bad.stdout)["status"] == "failed"
     assert "Traceback" not in bad.stderr

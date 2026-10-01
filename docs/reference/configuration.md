@@ -9,10 +9,10 @@ Each file is validated before merging. Omitted keys inherit earlier values.
 Nested mappings merge by property; lists replace earlier lists.
 CLI options may precede or follow the subcommand.
 
-Every file needs `schema_version: "2.0.0"`.
-This version accepts 2.0.x, including newer patch versions. Other major/minor versions and missing versions fail.
+New files use `schema_version: "2.1.0"`.
+This version accepts 2.0.x and 2.1.x, including newer patch versions. Other major/minor versions and missing versions fail. Existing 2.0.x files remain readable.
 Old 1.0.x settings are rejected with migration instructions. Reading configuration never rewrites it.
-To migrate, set `schema_version: "2.0.0"` and replace `generation.language: ja`/`en` with
+To migrate 1.0.x, set `schema_version: "2.1.0"` and replace `generation.language: ja`/`en` with
 `generation.prompt_profile: default-ja`/`default-en`. Replace `--language` with `--prompt-profile`.
 Relative input/output/config paths resolve from the current working directory; `~` expands to the user's home.
 Credentials are owned by GenAI Bridge, not this configuration.
@@ -27,6 +27,9 @@ Credentials are owned by GenAI Bridge, not this configuration.
 | `extraction.include_comments` | `true` | Include comments; CLI: `--no-comments` to disable. |
 | `extraction.max_file_mb` | `100` | Maximum compressed source size, in MiB. |
 | `extraction.max_uncompressed_mb` | `1024` | Maximum total declared uncompressed ZIP size, in MiB. |
+| `generation.default_generator` | `null` | Named preset used unless CLI `--generator` selects another. The initialized example selects `my-codex-def`. |
+| `generation.generators` | `{}` | Named presets, merged by ID and field across configuration layers. |
+| `generation.overrides` | `{}` | Shared scalar Bridge overrides, inherited by named presets. |
 | `generation.bridge_profile` | `codex-default` | Named connection in GenAI Bridge. CLI: `--bridge-profile`. |
 | `generation.prompt_profile` | `default-ja` | Complete content bundle. Built-ins: `default-ja` and `default-en`. CLI: `--prompt-profile`. |
 | `generation.profile_dirs` | `[]` | Optional parent directories containing complete content bundles; searched in list order before packaged profiles. |
@@ -48,6 +51,50 @@ generation:
   prompt_profile: default-en
   max_slides: 5
 ```
+
+## Named generators
+
+A generator groups `bridge_profile`, `prompt_profile` and optional `overrides`.
+It is a reusable preset, not another AI provider. Connections and credentials stay in GenAI Bridge.
+
+```yaml
+schema_version: "2.1.0"
+generation:
+  default_generator: my-codex-def
+  generators:
+    my-codex-def:
+      bridge_profile: codex-default
+      prompt_profile: default-ja
+      overrides: {}
+    my-codex-en:
+      bridge_profile: codex-default
+      prompt_profile: default-en
+      overrides:
+        timeout_seconds: 450
+  max_slides: 10
+```
+
+```shell
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --generator my-codex-en --context
+tkn-powerpoint-note config show --generator my-codex-en
+```
+
+Selection is CLI `--generator` → `generation.default_generator`. `null` uses the shared settings.
+Effective fields resolve in this order: individual CLI `--bridge-profile` / `--prompt-profile` → selected generator → shared generation settings → built-in defaults.
+Omitted preset fields inherit shared settings. Definitions with the same ID deep-merge by field, including `overrides`, across config files. Each fragment is validated before merging, even for unused presets.
+IDs use letters/digits with optional `.`, `_` and `-`, starting with a letter or digit.
+Unknown selections fail before output or AI calls. Only the selected content profile's resources are loaded.
+
+`overrides` accepts `model` and `reasoning_effort` (nonempty strings or `null`), `timeout_seconds` (positive finite number up to 86400), `max_output_tokens` (positive integer or `null`) and `local_only` (boolean).
+Provider-specific combinations are checked by GenAI Bridge when `--context` is used; for example, output-token limits require an API provider.
+These scalar settings can be validated during ordinary extraction without installing context dependencies.
+Rendering/selection limits and `profile_dirs` remain shared `generation` settings.
+
+Generator selection also controls the template language during ordinary extraction; AI remains opt-in with `--context`.
+Flat `generation.bridge_profile` / `prompt_profile` settings remain supported and do not require named presets. Configuration reads never migrate or overwrite user files.
+`config show` reports the definitions, selected ID, effective values and per-field winning sources.
+The selected ID appears as `generationGenerator` in note Frontmatter and `generation_generator` in evidence, results and AI usage.
+Context cache keys use resolved settings and the selected ID. Editing an unused preset does not invalidate a note; changing selected settings can regenerate AI explanations. Reviewed/edited notes keep their normal protection.
 
 ## Content profiles
 

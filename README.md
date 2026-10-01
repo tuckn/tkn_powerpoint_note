@@ -1,4 +1,4 @@
-# Tkn PowerPoint Note
+# tkn-powerpoint-note: Tkn PowerPoint Note — PowerPoint を Markdown にする
 
 PowerPoint の内容を、人と生成 AI が理解・参照できる Markdown ノートにします。
 通常は文字と構造をローカルで抽出し、`--context` を付けるとスライド画像から図・矢印・配置・色の意味を文章化します。
@@ -30,8 +30,8 @@ uv tool install ".[context]" --reinstall
 
 画像を扱える [GenAI Bridge](https://github.com/tuckn/tkn_genai_bridge) の接続設定と認証も必要です。
 接続先・モデルは `~/.tkn/genai_bridge/config.yaml` に設定します。
-この CLI の `generation.bridge_profile` はその接続設定を選びます。
-`generation.prompt_profile` は、言語・プロンプト・出力構造をまとめたプロファイルを選びます。
+この CLI の `generation.generators.<id>.bridge_profile` はその接続設定を選びます。
+`prompt_profile` は、言語・プロンプト・出力構造をまとめたプロファイルを選びます。
 
 ## 最初のノートを作る
 
@@ -113,19 +113,37 @@ tkn-powerpoint-note config show
 優先順位は、組み込み既定値 → ユーザー設定 → `./.tkn/config.yaml` → `--config FILE` → 個別 CLI オプションです。
 相対パスは実行時の作業フォルダを基準にします。
 
-各設定ファイルには `schema_version: "2.0.0"` が必要です。
+新しい設定ファイルには `schema_version: "2.1.0"` を指定します。従来の `2.0.x` と共通の `generation.bridge_profile`／`prompt_profile` も使えます。
 ノートの言語はプロファイルで選びます。組み込みは `default-ja`（既定・日本語）と `default-en`（英語）の2種類です。
 
 ```yaml
-schema_version: "2.0.0"
+schema_version: "2.1.0"
+
 generation:
-  prompt_profile: default-en
+  default_generator: my-codex-def
+  generators:
+    my-codex-def:
+      bridge_profile: codex-default
+      prompt_profile: default-ja
+      overrides: {}
+    my-codex-en:
+      bridge_profile: codex-default
+      prompt_profile: default-en
 ```
 
-一度だけ切り替える場合は `export FILE --prompt-profile default-en` を使います。
+通常は `default_generator` を使い、一度だけ切り替える場合は `--generator` を指定します。
+
+```shell
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --generator my-codex-en --context
+tkn-powerpoint-note config show --generator my-codex-en
+```
+
+個別の `--bridge-profile`／`--prompt-profile` は選択したgeneratorより優先します。
+`overrides` にはモデル・推論強度・タイムアウトなどを指定できます。
+スライド数や画像幅の設定は、引き続き `generation.max_slides`／`image_width` に置きます。
 通常の抽出でもプロファイルの表示文言とテンプレートを使います。原文の翻訳は行いません。
 
-旧設定を使っている場合は `schema_version` を `"2.0.0"` に変更し、
+旧 `1.0.x` 設定を使っている場合は `schema_version` を `"2.1.0"` に変更し、
 `generation.language: ja`／`en` を `generation.prompt_profile: default-ja`／`default-en` に置き換えてください。
 旧 `--language` も `--prompt-profile` に置き換わります。設定ファイルの自動書き換えは行いません。
 不正な版、未知のキー、型の誤りは処理前にエラーにします。

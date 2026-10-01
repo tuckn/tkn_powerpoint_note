@@ -1,4 +1,4 @@
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 
 # No source catalog or pull/push synchronization.
 selection:
@@ -14,9 +14,21 @@ extraction:
   max_uncompressed_mb: 1024
 
 generation:
-  bridge_profile: codex-default
-  prompt_profile: default-ja # default-ja or default-en; owns the note language
-  profile_dirs: [] # optional parent directories containing complete profile bundles
+  # CLI --generator > this default; null uses the shared/legacy settings.
+  default_generator: my-codex-def
+  generators:
+    my-codex-def:
+      bridge_profile: codex-default
+      prompt_profile: default-ja # templates own the language and structure
+      overrides: {} # model, reasoning_effort, timeout_seconds, max_output_tokens, local_only
+    my-codex-en:
+      bridge_profile: codex-default
+      prompt_profile: default-en
+
+  # Connections, authentication and provider-specific settings belong in GenAI Bridge.
+  # --bridge-profile / --prompt-profile override the selected generator for one invocation.
+  # Ordinary extraction uses the prompt profile without calling AI; AI requires --context.
+  profile_dirs: [] # ordered parent directories containing complete profile bundles
   max_slides: 10 # safety limit per context export; never silently truncate
   max_input_chars: 120000
   image_width: 2400

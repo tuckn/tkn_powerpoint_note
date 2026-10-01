@@ -75,7 +75,7 @@ The sibling `<note>.assets/<build-key>/` folder contains:
 
 - `evidence.json`: filtered selected-slide evidence, deck metadata and source hash.
 - `body.md`: the exact generated Markdown block.
-- `manifest.json`: schema version, generator version, selected content profile provenance, source/build hashes and file checksums.
+- `manifest.json`: schema version, generator version, selected generation preset, selected content profile provenance, source/build hashes and file checksums.
 - Context exports add slide PNGs, combined context JSON, per-call prompts/schemas, validated responses and usage records.
 
 Keep the note and its assets together. Moving both together preserves relative links.
@@ -83,7 +83,7 @@ Source paths are absolute in Frontmatter; use `verify --source FILE` to verify a
 Private evidence belongs outside version control. This repository ignores `.local/`, which is for retained development evidence.
 Source packages are not retained in successful bundles.
 
-Build keys include source bytes, selected evidence/settings, generator version, selected content profile identity/resource hashes and connection settings.
+Build keys include source bytes, selected evidence/settings, generator version, selected generation preset, selected content profile identity/resource hashes and connection settings. Unselected generator definitions are excluded.
 Any source byte change invalidates the bundle, including changes to unselected slides.
 There is no per-slide incremental synchronization or accumulation across selections.
 Identical exports verify existing artifacts and return unchanged.

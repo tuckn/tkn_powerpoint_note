@@ -123,6 +123,9 @@ def make_parser() -> argparse.ArgumentParser:
         help="Regenerate context even for unchanged input; requires --context and can incur charges.",
     )
     create.add_argument(
+        "--generator", help="Named generation settings; overrides generation.default_generator."
+    )
+    create.add_argument(
         "--bridge-profile", help="GenAI Bridge connection profile (default: codex-default)."
     )
     create.add_argument(
@@ -152,6 +155,7 @@ def make_parser() -> argparse.ArgumentParser:
     init.add_argument("--dry-run", action="store_true", help="Preview without creating files.")
     show = config_sub.add_parser("show", help="Read effective settings and winning sources.")
     common(show)
+    show.add_argument("--generator", help="Inspect effective settings for a named generator.")
     return parser
 
 
@@ -193,7 +197,11 @@ def main(argv: list[str] | None = None) -> int:
                 args.source.expanduser().resolve() if args.source else None,
             )
         else:
-            config, details = resolve(getattr(args, "config", None), overrides(args))
+            config, details = resolve(
+                getattr(args, "config", None),
+                overrides(args),
+                generator=getattr(args, "generator", None),
+            )
             if args.command == "config":
                 result = {"config": config, **details}
             elif args.command == "inspect":

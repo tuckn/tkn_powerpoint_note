@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+0.4.0:
+
+- Add generation.default_generator, named generation.generators and --generator for export/config show.
+- Resolve individual CLI options after the selected generator, deep-merge layered definitions and report effective setting sources.
+- Add validated scalar GenAI Bridge overrides and record the selected generator in notes, evidence and usage.
+- Keep flat generation settings and config schema 2.0.x readable; new config examples use 2.1.0.
+- Exclude unselected generator definitions from output cache keys; keep edited/reviewed note protection.
+
 0.3.0:
 
 - Rename the public `build FILE` command to `export FILE`; use `export` in existing scripts. The old command is no longer accepted.

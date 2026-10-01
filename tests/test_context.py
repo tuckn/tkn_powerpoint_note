@@ -16,7 +16,9 @@ from powerpoint_note.render import check_renderable
 def bridge(monkeypatch):
     bridge = pytest.importorskip("tkn_genai_bridge")
     monkeypatch.setattr(
-        bridge, "load_profile", lambda name: bridge.Profile(provider="codex", model="test-model")
+        bridge,
+        "load_profile",
+        lambda name, **kwargs: bridge.Profile(provider="codex", model="test-model"),
     )
     actual_plan = bridge.Runtime.plan
     monkeypatch.setattr(
@@ -183,3 +185,34 @@ def test_selected_profile_reaches_provider_and_usage(
     usage = json.loads((tmp_path / "deck.usage.json").read_text("utf-8"))
     assert usage["prompt_profile"] == generator.content_profile.provenance()
     assert usage["prompt_profile"]["name"] == name
+
+
+def test_generator_overrides_reach_bridge_plan_and_usage(config, bridge, monkeypatch, tmp_path):
+    seen = []
+
+    def load_profile(name, *, overrides):
+        seen.append((name, overrides))
+        return bridge.Profile(provider="codex", **overrides)
+
+    monkeypatch.setattr(bridge, "load_profile", load_profile)
+    monkeypatch.setattr(
+        bridge.Runtime,
+        "generate",
+        lambda self, request: SimpleNamespace(
+            data={"summary": "Supported", "key_points": [], "uncertainties": []},
+            record=SimpleNamespace(model_dump=lambda **kwargs: {}),
+        ),
+    )
+    config["generation"].update(
+        generator_id="named",
+        bridge_profile="named-connection",
+        overrides={"model": "overridden-model", "timeout_seconds": 450},
+    )
+    generator = Generator(config["generation"])
+    assert seen == [("named-connection", {"model": "overridden-model", "timeout_seconds": 450})]
+    assert generator.plan["model"] == "overridden-model"
+    assert generator.plan["timeout_seconds"] == 450
+    generator.generate("deck", {"slides": []}, None, tmp_path, "named")
+    usage = json.loads((tmp_path / "named.usage.json").read_text("utf-8"))
+    assert usage["generation_generator"] == "named"
+    assert usage["model"] == "overridden-model"

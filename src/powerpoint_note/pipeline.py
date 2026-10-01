@@ -96,6 +96,8 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
         "build_key"
     ] != metadata.get("buildKey"):
         raise NoteError("Note and evidence provenance disagree")
+    if manifest.get("generation_generator") != metadata.get("generationGenerator"):
+        raise NoteError("Note and evidence generation settings provenance disagree")
     if manifest.get("prompt_profile") != metadata.get("promptProfile"):
         raise NoteError("Note and evidence prompt profile provenance disagree")
     original = source or Path(metadata["sourceFile"])
@@ -177,7 +179,16 @@ def build(
         {
             "source": deck.source_sha256,
             "evidence": evidence,
-            "generation": config["generation"] if context else {"prompt_profile": profile.name},
+            "generation": {
+                key: value
+                for key, value in config["generation"].items()
+                if key not in {"generators", "default_generator"}
+            }
+            if context
+            else {
+                "prompt_profile": profile.name,
+                "generator_id": config["generation"].get("generator_id"),
+            },
             "context": context,
             "version": __version__,
             "prompt_profile": profile.provenance(),
@@ -191,6 +202,7 @@ def build(
             "dry_run": dry_run,
             "output": str(output),
             "selected_slides": [s.number for s in slides],
+            "generation_generator": config["generation"].get("generator_id"),
             "ai_calls": 0,
         }
     if old.get("reviewStatus") == "reviewed" and not force:
@@ -214,6 +226,7 @@ def build(
         "total_slides": len(deck.slides),
         "context": context,
         "prompt_profile": profile.provenance(),
+        "generation_generator": config["generation"].get("generator_id"),
         "ai_calls": (len(slides) + 1 if context and not cached else 0),
         "excluded_hidden": sum(s.hidden for s in deck.slides)
         if not config["selection"]["include_hidden"]
@@ -279,6 +292,7 @@ def build(
                 "source_sha256": deck.source_sha256,
                 "generator_version": __version__,
                 "prompt_profile": profile.provenance(),
+                "generation_generator": config["generation"].get("generator_id"),
                 "created_at": datetime.now(UTC).isoformat(),
                 "files": {p.name: file_digest(p) for p in staging.iterdir() if p.is_file()},
             }
@@ -295,6 +309,7 @@ def build(
             "generator": "tkn-powerpoint-note",
             "generatorVersion": __version__,
             "promptProfile": profile.provenance(),
+            "generationGenerator": config["generation"].get("generator_id"),
             "sourceFile": str(source),
             "sourceSha256": deck.source_sha256,
             "sourceMetadata": deck.metadata,

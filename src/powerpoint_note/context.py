@@ -46,7 +46,9 @@ class Generator:
                 "Install context dependencies: uv tool install '.[context]' --reinstall"
             ) from exc
         try:
-            self.profile = self.bridge.load_profile(settings["bridge_profile"])
+            self.profile = self.bridge.load_profile(
+                settings["bridge_profile"], overrides=settings.get("overrides", {})
+            )
             with self.bridge.Runtime(self.profile) as runtime:
                 plan = runtime.plan(
                     self.bridge.GenerationRequest(
@@ -97,6 +99,7 @@ class Generator:
             "schema_sha256": fingerprint(schema),
             **self.plan,
             "prompt_profile": self.content_profile.provenance(),
+            "generation_generator": self.settings.get("generator_id"),
             "provider_schema_sha256": fingerprint(request.output_schema),
         }
         atomic_write(

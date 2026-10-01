@@ -30,7 +30,7 @@ def test_layers_and_winners(tmp_path):
     assert report["winning_sources"]["generation.prompt_profile"] == str(g.resolve())
     assert report["winning_sources"]["generation.max_slides"] == "CLI"
     assert len(report["sources"]) == 3
-    assert config["schema_version"] == "2.0.0"
+    assert config["schema_version"] == "2.1.0"
 
 
 @pytest.mark.parametrize(
@@ -39,7 +39,7 @@ def test_layers_and_winners(tmp_path):
         "{}",
         "schema_version: 1.0",
         "schema_version: '3.0.0'",
-        "schema_version: '2.1.0'",
+        "schema_version: '2.2.0'",
         "schema_version: '0.9.0'",
         "schema_version: '2.0.0'\nsources: {}",
         "schema_version: '2.0.0'\nselection:\n  include_hidden: yesplease",
@@ -70,7 +70,7 @@ def test_init_dry_run_idempotency_and_edit_protection(tmp_path):
     assert initialize(path, True)["status"] == "created"
     assert not path.parent.exists()
     assert initialize(path, False)["status"] == "created"
-    assert path.read_text("utf-8").startswith('schema_version: "2.0.0"')
+    assert path.read_text("utf-8").startswith('schema_version: "2.1.0"')
     assert initialize(path, False)["status"] == "unchanged"
     path.write_text(example() + "# my setting\n", encoding="utf-8")
     with pytest.raises(NoteError):
