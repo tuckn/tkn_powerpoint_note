@@ -6,24 +6,17 @@ import html
 import json
 import re
 from dataclasses import asdict
-from importlib.resources import files
 from typing import Any
 from urllib.parse import quote
 
 import yaml
 
+from .context_profiles import ContextProfile
 from .io import digest
 from .models import Deck, NoteError, Shape, Slide
 
 BEGIN = "<!-- powerpoint-note:begin -->"
 END = "<!-- powerpoint-note:end -->"
-
-
-def labels(language: str) -> dict[str, str]:
-    data: dict[str, dict[str, str]] = json.loads(
-        files("powerpoint_note").joinpath("resources/labels.json").read_text("utf-8")
-    )
-    return data[language]
 
 
 def literal(text: str) -> str:
@@ -50,14 +43,16 @@ def slide_evidence(slide: Slide, off_slide: str) -> dict[str, Any]:
     return data
 
 
-def shape_markdown(shapes: list[Shape]) -> str:
+def shape_markdown(shapes: list[Shape], words: dict[str, str]) -> str:
     output = []
     for shape in shapes:
         qualifier = (
-            f" [{shape.location}]" if shape.location in {"outside", "partial", "unknown"} else ""
+            f" [{words['location_' + shape.location]}]"
+            if shape.location in {"outside", "partial", "unknown"}
+            else ""
         )
         if shape.paragraphs:
-            output.append(f"**{line(shape.role or 'text')} · #{line(shape.id)}{qualifier}**")
+            output.append(f"**{line(shape.role or words['text'])} · #{line(shape.id)}{qualifier}**")
             for p in shape.paragraphs:
                 indent = "  " * min(p["level"], 8)
                 output.append(
@@ -67,24 +62,30 @@ def shape_markdown(shapes: list[Shape]) -> str:
             count = max(map(len, shape.table))
             rows = [r + [""] * (count - len(r)) for r in shape.table]
             # Generic column headings avoid inventing header semantics for a data-only first row.
-            output.append("| " + " | ".join(f"Column {i}" for i in range(1, count + 1)) + " |")
+            output.append(
+                "| " + " | ".join(f"{words['column']} {i}" for i in range(1, count + 1)) + " |"
+            )
             output.append("| " + " | ".join("---" for _ in range(count)) + " |")
             output.extend("| " + " | ".join(line(c) for c in row) + " |" for row in rows)
             if shape.details.get("merged_cells"):
-                output.append("> Merged cells are recorded in the evidence JSON.")
+                output.append("> " + words["merged_cells"])
         if shape.kind == "chart":
             chart = shape.details["chart"]
-            output.append(f"**Chart · #{line(shape.id)}{qualifier}**")
+            output.append(f"**{words['chart']} · #{line(shape.id)}{qualifier}**")
             output.append(source_block(json.dumps(chart, ensure_ascii=False, indent=2)))
         if shape.kind == "smartart":
-            output.append(f"**SmartArt · #{line(shape.id)}{qualifier}**")
+            output.append(f"**{words['smartart']} · #{line(shape.id)}{qualifier}**")
             output.append(source_block("\n".join(shape.details.get("smartart_text", []))))
         if shape.kind in {"pic", "cxnSp"} or (not shape.text and not shape.table):
             details = f"; {line(shape.alt_text)}" if shape.alt_text else ""
-            output.append(f"- Object #{line(shape.id)}: {line(shape.kind)}{qualifier}{details}")
+            output.append(
+                f"- {words['object']} #{line(shape.id)}: {line(shape.kind)}{qualifier}{details}"
+            )
             if shape.kind == "cxnSp":
                 output.append(
-                    "  - Endpoints/style (no inferred semantics): "
+                    "  - "
+                    + words["endpoints"]
+                    + ": "
                     + line(json.dumps(shape.details.get("connections", []), ensure_ascii=False))
                 )
         output.append("")
@@ -97,84 +98,87 @@ def render_body(
     evidence_link: str,
     image_root: str,
     config: dict[str, Any],
+    profile: ContextProfile,
     contexts: dict[str, Any] | None = None,
 ) -> str:
-    words = labels(config["generation"]["language"])
-    output = [
-        f"{words['coverage']}: {', '.join(str(s.number) for s in slides)} / {len(deck.slides)}",
-        "",
-        words["ai"] if contexts else words["local"],
-        "",
-        f"[{words['evidence']}]({quote(evidence_link, safe='/')})",
-        "",
-    ]
+    words = profile.labels
+    overview = ""
     if contexts:
         summary = contexts["deck"]
-        output.extend([f"## {words['overview']}", "", summary["summary"], ""])
+        points = []
         for item in summary["key_points"]:
             cites = ", ".join(f"[{n}](#slide-{n})" for n in item["slides"])
-            output.append(f"- {item['text']} ({words['slide']} {cites})")
-        if summary["uncertainties"]:
-            output.extend(["", f"### {words['uncertainties']}", ""])
-            output.extend("- " + x for x in summary["uncertainties"])
-        output.append("")
-    for slide in slides:
-        output.extend(
-            [
-                f'<a id="slide-{slide.number}"></a>',
-                f"## {words['slide']} {slide.number}: {line(slide.title) or '—'}",
-                "",
-                f"- Slide ID: {line(slide.slide_id)}; page number: {slide.page_number}; hidden: {str(slide.hidden).lower()}",
-            ]
+            points.append(f"- {item['text']} ({words['slide']} {cites})")
+        overview = profile.render(
+            "deck",
+            {
+                "summary": summary["summary"],
+                "key_points": "\n".join(points),
+                "uncertainties": "\n".join("- " + x for x in summary["uncertainties"]),
+            },
         )
-        if slide.section:
-            output.append(f"- Section: {line(slide.section)}")
-        output.append("")
+    rendered_slides = []
+    for slide in slides:
+        image, context_text = "", ""
         if contexts:
             image_link = quote(f"{image_root}/slide-{slide.number:04d}.png", safe="/")
-            output.extend(
-                [
-                    f"![{words['slide']} {slide.number}]({image_link})",
-                    "",
-                    f"### {words['context']}",
-                    "",
-                ]
-            )
+            image = f"![{words['slide']} {slide.number}]({image_link})"
             context = contexts["slides"][str(slide.number)]
-            output.extend([context["summary"], ""])
-            for section in context["sections"]:
-                output.extend([f"#### {line(section['heading'])}", "", section["body"], ""])
-            if context["uncertainties"]:
-                output.extend([f"#### {words['uncertainties']}", ""])
-                output.extend("- " + item for item in context["uncertainties"])
-                output.append("")
-        output.extend(
-            [
-                f"### {words['content']}",
-                "",
-                shape_markdown([s for s in slide.shapes if s.location != "outside"]),
-                "",
-            ]
+            sections = "\n\n".join(
+                f"#### {line(section['heading'])}\n\n{section['body']}"
+                for section in context["sections"]
+            )
+            context_text = profile.render(
+                "slide",
+                {
+                    "summary": context["summary"],
+                    "sections": sections,
+                    "uncertainties": "\n".join("- " + x for x in context["uncertainties"]),
+                },
+            )
+        comments = "\n\n".join(
+            f"- {line(c['author'])} · {line(c['created'])}\n{source_block(c['text'])}"
+            for c in slide.comments
         )
-        if slide.notes:
-            output.extend([f"### {words['notes']}", "", source_block(slide.notes), ""])
-        if slide.comments:
-            output.extend([f"### {words['comments']}", ""])
-            for comment in slide.comments:
-                output.extend(
-                    [
-                        f"- {line(comment['author'])} · {line(comment['created'])}",
-                        source_block(comment["text"]),
-                        "",
-                    ]
-                )
-        if config["selection"]["off_slide"] == "append":
-            outside = [s for s in slide.shapes if s.location == "outside"]
-            if outside:
-                output.extend([f"### {words['outside']}", "", shape_markdown(outside), ""])
-        for warning in slide.warnings:
-            output.extend(["> " + warning, ""])
-    return "\n".join(output).strip() + "\n"
+        outside = (
+            shape_markdown([s for s in slide.shapes if s.location == "outside"], words)
+            if config["selection"]["off_slide"] == "append"
+            else ""
+        )
+        rendered = profile.render(
+            "source",
+            {
+                "number": str(slide.number),
+                "title": line(slide.title) or "—",
+                "slide_id": line(slide.slide_id),
+                "page_number": str(slide.page_number)
+                if slide.page_number is not None
+                else words["unknown_value"],
+                "hidden": words["hidden_yes" if slide.hidden else "hidden_no"],
+                "section": line(slide.section) if slide.section else "",
+                "image": image,
+                "context": context_text,
+                "content": shape_markdown(
+                    [s for s in slide.shapes if s.location != "outside"], words
+                ),
+                "notes": source_block(slide.notes) if slide.notes else "",
+                "comments": comments,
+                "outside": outside,
+                "warnings": "\n\n".join("> " + warning for warning in slide.warnings),
+            },
+        )
+        # Anchors are application-owned source identifiers, independent of translated templates.
+        rendered_slides.append(f'<a id="slide-{slide.number}"></a>\n' + rendered)
+    return profile.render(
+        "note",
+        {
+            "coverage": f"{', '.join(str(s.number) for s in slides)} / {len(deck.slides)}",
+            "mode": words["ai"] if contexts else words["local"],
+            "evidence": f"[{words['evidence']}]({quote(evidence_link, safe='/')})",
+            "overview": overview,
+            "slides": "\n".join(rendered_slides),
+        },
+    )
 
 
 def split_note(text: str) -> tuple[dict[str, Any], str, str, str]:
@@ -203,7 +207,7 @@ def compose(
     existing: str | None,
     metadata: dict[str, Any],
     body: str,
-    language: str,
+    profile: ContextProfile,
 ) -> str:
     if existing is not None:
         old, before, _, after = split_note(existing)
@@ -211,7 +215,7 @@ def compose(
         metadata = old
     else:
         before = "\n"
-        after = "\n\n" + labels(language)["personal"] + "\n"
+        after = "\n\n" + profile.labels["personal"] + "\n"
     metadata["generatedSha256"] = digest(body.encode("utf-8"))
     return (
         "---\n"

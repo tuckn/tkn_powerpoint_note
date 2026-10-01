@@ -9,9 +9,11 @@ Each file is validated before merging. Omitted keys inherit earlier values.
 Nested mappings merge by property; lists replace earlier lists.
 CLI options may precede or follow the subcommand.
 
-Every file needs `schema_version: "1.0.0"`.
-This version accepts 1.0.x, including newer patch versions. Other major/minor versions and missing versions fail.
-There are no legacy migrations. Reading configuration never rewrites it.
+Every file needs `schema_version: "2.0.0"`.
+This version accepts 2.0.x, including newer patch versions. Other major/minor versions and missing versions fail.
+Old 1.0.x settings are rejected with migration instructions. Reading configuration never rewrites it.
+To migrate, set `schema_version: "2.0.0"` and replace `generation.language: ja`/`en` with
+`generation.prompt_profile: default-ja`/`default-en`. Replace `--language` with `--prompt-profile`.
 Relative input/output/config paths resolve from the current working directory; `~` expands to the user's home.
 Credentials are owned by GenAI Bridge, not this configuration.
 
@@ -26,7 +28,8 @@ Credentials are owned by GenAI Bridge, not this configuration.
 | `extraction.max_file_mb` | `100` | Maximum compressed source size, in MiB. |
 | `extraction.max_uncompressed_mb` | `1024` | Maximum total declared uncompressed ZIP size, in MiB. |
 | `generation.bridge_profile` | `codex-default` | Named connection in GenAI Bridge. CLI: `--bridge-profile`. |
-| `generation.language` | `ja` | `ja` or `en`; affects note labels and AI writing language. |
+| `generation.prompt_profile` | `default-ja` | Complete content bundle. Built-ins: `default-ja` and `default-en`. CLI: `--prompt-profile`. |
+| `generation.profile_dirs` | `[]` | Optional parent directories containing complete content bundles; searched in list order before packaged profiles. |
 | `generation.max_slides` | `10` | Maximum selected slides per context build; CLI: `--max-slides`. A selection above it fails before AI. |
 | `generation.max_input_chars` | `120000` | Maximum evidence JSON characters per slide or summary request; excludes image bytes and prompt instructions. Exceeding it fails; no text truncation. |
 | `generation.image_width` | `2400` | PNG width in pixels, 600–8000. Height preserves slide aspect ratio. |
@@ -40,8 +43,62 @@ Unknown keys, blank strings, nonpositive limits and wrong types are errors.
 For example, this is a complete valid configuration file that changes language and the context selection limit, inheriting other defaults:
 
 ```yaml
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 generation:
-  language: en
+  prompt_profile: default-en
   max_slides: 5
 ```
+
+## Content profiles
+
+The two built-in bundles are [default-ja](../../src/powerpoint_note/context_profiles/default-ja/)
+and [default-en](../../src/powerpoint_note/context_profiles/default-en/).
+Each bundle contains these application-owned resources:
+
+| File | Purpose |
+| --- | --- |
+| `prompt.md` | Instructions for interpreting one slide. |
+| `output.schema.json` | Canonical structured slide response schema. |
+| `template.md` | Slide context Markdown; YAML Frontmatter supplies bundle `version`, `language` and `labels`. |
+| `deck-prompt.md` | Instructions for synthesizing the selected slide analyses. |
+| `deck-output.schema.json` | Canonical presentation response schema, including citations. |
+| `deck-template.md` | Presentation context Markdown. |
+| `note-template.md` | Generated note body: coverage, mode, evidence link, overview and slides. |
+| `source-template.md` | Source slide structure: title, metadata, image/context, extracted content, notes, comments and supplements. |
+
+`template.md` owns the writing language, such as `Japanese` or `English`.
+Both prompts substitute its `{{language}}` placeholder. All other templates use the bundle's own text.
+Ordinary builds use the same bundle for labels and structure; extracted source text is never translated.
+CLI diagnostics, JSON keys and machine evidence retain their stable technical names.
+
+For an additional curated bundle, copy an entire built-in directory under an explicitly configured parent directory:
+
+```yaml
+schema_version: "2.0.0"
+generation:
+  prompt_profile: team-ja
+  profile_dirs:
+    - "C:/path/to/profiles"
+```
+
+This loads `C:/path/to/profiles/team-ja/`. Relative directories resolve from the execution working directory.
+Names use lowercase letters, digits, dots, underscores and hyphens, starting with a letter or digit.
+The first matching directory supplies the **whole bundle**. Missing files never fall back individually to packaged files.
+Unknown names and malformed selected bundles fail before Office setup, AI calls or note writes, including dry-run.
+`config show` reports the resolved name, language, version, resource hashes and package/custom source.
+Unselected profiles are neither loaded nor validated.
+
+Keep prompt, schema and template changes consistent. Individual resource path overrides are not supported.
+Bundle metadata uses version `1.0.x`. Templates use `{{field}}` once per required renderer field;
+optional sections use `{{#field}} ... {{field}} ... {{/field}}`, without nesting.
+Keep the placeholders provided by the built-in templates when changing headings or order.
+Source text containing template tokens is inserted literally, without a second evaluation.
+Structured schema fields and types must remain compatible with the renderer.
+Schemas must be self-contained: references, including remote references, are rejected.
+Reserved `powerpoint-note:` management markers belong to the application and cannot occur in profile resources.
+
+The selected bundle's name, version and all eight resource hashes participate in the build key.
+Changing any selected resource can cause regeneration, including new AI calls for a context build.
+The note Frontmatter, evidence manifest and AI usage records retain bundle provenance.
+Editing an unused profile does not invalidate existing output. Reviewed/edited notes retain their normal protections.
+After changing packaged resources, reinstall a non-editable tool installation; custom profile directories are read directly.

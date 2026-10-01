@@ -125,7 +125,10 @@ def make_parser() -> argparse.ArgumentParser:
     create.add_argument(
         "--bridge-profile", help="GenAI Bridge connection profile (default: codex-default)."
     )
-    create.add_argument("--language", choices=["ja", "en"], help="Note language (default: ja).")
+    create.add_argument(
+        "--prompt-profile",
+        help="Content profile: default-ja (default), default-en, or a complete custom bundle.",
+    )
     create.add_argument(
         "--max-slides",
         type=int,
@@ -162,7 +165,7 @@ def overrides(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
         "notes": ("extraction", "include_notes"),
         "comments": ("extraction", "include_comments"),
         "bridge_profile": ("generation", "bridge_profile"),
-        "language": ("generation", "language"),
+        "prompt_profile": ("generation", "prompt_profile"),
         "max_slides": ("generation", "max_slides"),
     }
     for arg, (group, key) in mapping.items():

@@ -39,7 +39,7 @@ def test_entrypoint_help_version_and_e2e(deck_path, tmp_path):
 
 def test_cli_config_show_readonly_and_error(tmp_path):
     show = run_cli("config", "show", cwd=tmp_path)
-    assert show.returncode == 0 and json.loads(show.stdout)["effective_schema_version"] == "1.0.0"
+    assert show.returncode == 0 and json.loads(show.stdout)["effective_schema_version"] == "2.0.0"
     bad = run_cli("build", "missing.pptx", cwd=tmp_path)
     assert bad.returncode != 0 and json.loads(bad.stdout)["status"] == "failed"
     assert "Traceback" not in bad.stderr
@@ -90,3 +90,16 @@ def test_log_filtering_and_stderr(capsys):
     logger = configure(verbose=True)
     logger.debug("detail")
     assert "[DEBUG] detail" in capsys.readouterr().err
+
+
+def test_cli_profile_selection_and_removed_language_option(deck_path, tmp_path):
+    help_result = run_cli("build", "--help", cwd=tmp_path)
+    assert "--prompt-profile" in help_result.stdout and "--language" not in help_result.stdout
+    output = tmp_path / "english.md"
+    result = run_cli(
+        "build", deck_path, "--output", output, "--prompt-profile", "default-en", cwd=tmp_path
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Extracted content" in output.read_text("utf-8")
+    bad = run_cli("build", deck_path, "--language", "en", cwd=tmp_path)
+    assert bad.returncode == 2

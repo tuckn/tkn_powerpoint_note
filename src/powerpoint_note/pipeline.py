@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .context import Generator, resources_hash
+from .context import Generator
+from .context_profiles import load_profile
 from .extract import read_deck
 from .io import atomic_write, digest, file_digest, fingerprint, json_text
-from .markdown import compose, labels, render_body, slide_evidence, split_note
+from .markdown import compose, render_body, slide_evidence, split_note
 from .models import Deck, NoteError, Slide
 from .render import check_renderable, preflight, render
 from .selection import select
@@ -95,6 +96,8 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
         "build_key"
     ] != metadata.get("buildKey"):
         raise NoteError("Note and evidence provenance disagree")
+    if manifest.get("prompt_profile") != metadata.get("promptProfile"):
+        raise NoteError("Note and evidence prompt profile provenance disagree")
     original = source or Path(metadata["sourceFile"])
     if not original.is_file() or file_digest(original) != metadata.get("sourceSha256"):
         raise NoteError("Source is missing or changed since this note was built")
@@ -150,6 +153,7 @@ def build(
         raise NoteError("Output must be a separate .md file")
     if refresh and not context:
         raise NoteError("--refresh requires --context")
+    profile = load_profile(config["generation"])
     LOGGER.info("Reading presentation and selecting slides.")
     deck = read_deck(source, config["extraction"])
     slides = select(deck, config["selection"])
@@ -168,18 +172,15 @@ def build(
                 )
         preflight()
         check_renderable(source.read_bytes())
-        generator = Generator(config["generation"])
+        generator = Generator(config["generation"], content_profile=profile)
     build_key = fingerprint(
         {
             "source": deck.source_sha256,
             "evidence": evidence,
-            "generation": config["generation"]
-            if context
-            else {"language": config["generation"]["language"]},
+            "generation": config["generation"] if context else {"prompt_profile": profile.name},
             "context": context,
             "version": __version__,
-            "resources": resources_hash(),
-            "labels": labels(config["generation"]["language"]),
+            "prompt_profile": profile.provenance(),
             "connection": generator.plan if generator else None,
         }
     )
@@ -212,6 +213,7 @@ def build(
         "selected_slides": [s.number for s in slides],
         "total_slides": len(deck.slides),
         "context": context,
+        "prompt_profile": profile.provenance(),
         "ai_calls": (len(slides) + 1 if context and not cached else 0),
         "excluded_hidden": sum(s.hidden for s in deck.slides)
         if not config["selection"]["include_hidden"]
@@ -267,7 +269,7 @@ def build(
                 atomic_write(staging / "context.json", json_text(contexts))
             relative = folder.relative_to(output.parent).as_posix()
             body = render_body(
-                deck, slides, relative + "/evidence.json", relative, config, contexts
+                deck, slides, relative + "/evidence.json", relative, config, profile, contexts
             )
             atomic_write(staging / "body.md", body)
             manifest = {
@@ -276,6 +278,7 @@ def build(
                 "build_key": build_key,
                 "source_sha256": deck.source_sha256,
                 "generator_version": __version__,
+                "prompt_profile": profile.provenance(),
                 "created_at": datetime.now(UTC).isoformat(),
                 "files": {p.name: file_digest(p) for p in staging.iterdir() if p.is_file()},
             }
@@ -291,6 +294,7 @@ def build(
             "schemaVersion": "1.0.0",
             "generator": "tkn-powerpoint-note",
             "generatorVersion": __version__,
+            "promptProfile": profile.provenance(),
             "sourceFile": str(source),
             "sourceSha256": deck.source_sha256,
             "sourceMetadata": deck.metadata,
@@ -301,7 +305,7 @@ def build(
             "reviewStatus": "unreviewed",
             "updated": datetime.now(UTC).isoformat(),
         }
-        text = compose(existing, metadata, body, config["generation"]["language"])
+        text = compose(existing, metadata, body, profile)
         split_note(text)
         if (output.read_text("utf-8-sig") if output.exists() else None) != existing or file_digest(
             source

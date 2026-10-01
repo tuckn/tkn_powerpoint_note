@@ -51,7 +51,9 @@ Fully off-slide supplements have no image; uncertain visual relationships there 
 All provider calls are explicit `--context` operations. A selection of N slides requires N + 1 calls when uncached.
 There is no automatic retry. The default maximum selection is 10; `--max-slides` explicitly changes it.
 
-Prompts, JSON schemas and labels are packaged resources.
+Prompts, JSON schemas, Markdown templates and labels form a complete selected content profile.
+Built-in profiles are `default-ja` and `default-en`; their metadata owns the writing language.
+The full selected bundle is validated before ordinary or context builds. See [content profiles](configuration.md#content-profiles).
 The app validates returned JSON, source slide numbers, summary citations and reserved management markers.
 The provider receives a schema without the unsupported `uniqueItems` constraint; the full packaged schema still validates citation uniqueness locally.
 These checks do not establish that every generated statement is accurate.
@@ -73,7 +75,7 @@ The sibling `<note>.assets/<build-key>/` folder contains:
 
 - `evidence.json`: filtered selected-slide evidence, deck metadata and source hash.
 - `body.md`: the exact generated Markdown block.
-- `manifest.json`: schema version, generator version, source/build hashes and file checksums.
+- `manifest.json`: schema version, generator version, selected content profile provenance, source/build hashes and file checksums.
 - Context builds add slide PNGs, combined context JSON, per-call prompts/schemas, validated responses and usage records.
 
 Keep the note and its assets together. Moving both together preserves relative links.
@@ -81,7 +83,7 @@ Source paths are absolute in Frontmatter; use `verify --source FILE` to verify a
 Private evidence belongs outside version control. This repository ignores `.local/`, which is for retained development evidence.
 Source packages are not retained in successful bundles.
 
-Build keys include source bytes, selected evidence/settings, generator version, language resources and connection settings.
+Build keys include source bytes, selected evidence/settings, generator version, selected content profile identity/resource hashes and connection settings.
 Any source byte change invalidates the bundle, including changes to unselected slides.
 There is no per-slide incremental synchronization or accumulation across selections.
 Identical builds verify existing artifacts and return unchanged.

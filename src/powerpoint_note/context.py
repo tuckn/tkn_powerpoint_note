@@ -7,32 +7,14 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
-from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 import jsonschema
 
+from .context_profiles import ContextProfile, load_profile
 from .io import atomic_write, digest, fingerprint, json_text
 from .models import NoteError
-
-
-def resource(name: str) -> str:
-    return files("powerpoint_note").joinpath("resources/context/" + name).read_text("utf-8")
-
-
-def resources_hash() -> str:
-    return fingerprint(
-        {
-            name: resource(name)
-            for name in (
-                "slide-prompt.md",
-                "deck-prompt.md",
-                "slide.schema.json",
-                "deck.schema.json",
-            )
-        }
-    )
 
 
 def provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -54,8 +36,9 @@ def provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 class Generator:
-    def __init__(self, settings: dict[str, Any]):
+    def __init__(self, settings: dict[str, Any], *, content_profile: ContextProfile | None = None):
         self.settings = settings
+        self.content_profile = content_profile or load_profile(settings)
         try:
             self.bridge = importlib.import_module("tkn_genai_bridge")
         except ImportError as exc:
@@ -67,8 +50,8 @@ class Generator:
             with self.bridge.Runtime(self.profile) as runtime:
                 plan = runtime.plan(
                     self.bridge.GenerationRequest(
-                        prompt=resource("slide-prompt.md"),
-                        output_schema=provider_schema(json.loads(resource("slide.schema.json"))),
+                        prompt=self.content_profile.prompts["slide"],
+                        output_schema=provider_schema(self.content_profile.schemas["slide"]),
                         schema_name="powerpoint_slide",
                     ),
                     check_executable=True,
@@ -98,10 +81,8 @@ class Generator:
             raise NoteError(
                 "AI evidence exceeds generation.max_input_chars; select fewer slides or raise the limit"
             )
-        schema = json.loads(resource(stage + ".schema.json"))
-        prompt = resource(stage + "-prompt.md").replace(
-            "{{language}}", {"ja": "Japanese", "en": "English"}[self.settings["language"]]
-        )
+        schema = self.content_profile.schemas[stage]
+        prompt = self.content_profile.prompts[stage]
         prompt += "\nSOURCE EVIDENCE (JSON):\n" + payload
         request = self.bridge.GenerationRequest(
             prompt=prompt,
@@ -115,6 +96,7 @@ class Generator:
             "prompt_sha256": digest(prompt.encode()),
             "schema_sha256": fingerprint(schema),
             **self.plan,
+            "prompt_profile": self.content_profile.provenance(),
             "provider_schema_sha256": fingerprint(request.output_schema),
         }
         atomic_write(
@@ -130,7 +112,7 @@ class Generator:
             with self.bridge.Runtime(self.profile) as runtime:
                 result = runtime.generate(request)
             data: dict[str, Any] = result.data
-            jsonschema.validate(data, schema)
+            jsonschema.Draft202012Validator(schema).validate(data)
             if stage == "slide" and data["slide_number"] != evidence["slide"]["number"]:
                 raise NoteError("AI output cited a different slide number")
             if stage == "deck":

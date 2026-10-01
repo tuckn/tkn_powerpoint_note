@@ -2,7 +2,18 @@
 
 ## Unreleased
 
-Initial 0.1.0 implementation:
+0.2.0:
+
+- Move prompts, structured response schemas, Markdown templates and display labels into complete `default-ja` / `default-en` content profiles.
+- Replace `generation.language` and `--language` with `generation.prompt_profile` and `--prompt-profile`; the profile owns the language.
+- Add optional `generation.profile_dirs` to load complete curated external bundles.
+- Change the config schema to `2.0.0`; old `1.0.x` configs fail with explicit migration instructions and are never rewritten automatically.
+- Validate profile resources before processing, record provenance in outputs and invalidate caches when selected resources change.
+- Keep source extraction, opt-in AI calls and protection of handwritten/reviewed notes.
+
+## 0.1.0
+
+Initial implementation:
 
 - Build a source-backed Markdown note from one read-only PowerPoint file.
 - Extract slide text, tables, cached chart data, SmartArt text, notes, comments, document properties and geometry.

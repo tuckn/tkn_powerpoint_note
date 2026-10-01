@@ -1,4 +1,4 @@
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 
 # No source catalog or pull/push synchronization.
 selection:
@@ -15,7 +15,8 @@ extraction:
 
 generation:
   bridge_profile: codex-default
-  language: ja # ja or en
+  prompt_profile: default-ja # default-ja or default-en; owns the note language
+  profile_dirs: [] # optional parent directories containing complete profile bundles
   max_slides: 10 # safety limit per context build; never silently truncate
   max_input_chars: 120000
   image_width: 2400

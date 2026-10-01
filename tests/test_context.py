@@ -129,9 +129,10 @@ def test_linked_resources_blocked_for_rendering(tmp_path):
 
 
 def test_provider_schema_preserves_local_uniqueness_contract():
-    from powerpoint_note.context import provider_schema, resource
+    from powerpoint_note.context import provider_schema
+    from powerpoint_note.context_profiles import load_profile
 
-    schema = json.loads(resource("deck.schema.json"))
+    schema = load_profile({"prompt_profile": "default-ja", "profile_dirs": []}).schemas["deck"]
     projected = provider_schema(schema)
     original_citations = schema["properties"]["key_points"]["items"]["properties"]["slides"]
     projected_citations = projected["properties"]["key_points"]["items"]["properties"]["slides"]
@@ -160,3 +161,25 @@ def test_duplicate_citations_rejected_locally_after_transport_projection(
             "deck", {"slides": [{"slide_number": 3}]}, None, tmp_path, "duplicates"
         )
     assert json.loads((tmp_path / "duplicates.usage.json").read_text("utf-8"))["status"] == "failed"
+
+
+@pytest.mark.parametrize("name,language", [("default-ja", "Japanese"), ("default-en", "English")])
+def test_selected_profile_reaches_provider_and_usage(
+    config, bridge, monkeypatch, tmp_path, name, language
+):
+    config["generation"]["prompt_profile"] = name
+
+    def generate(self, request):
+        assert language in request.prompt
+        assert "{{language}}" not in request.prompt
+        return SimpleNamespace(
+            data={"summary": "Supported", "key_points": [], "uncertainties": []},
+            record=SimpleNamespace(model_dump=lambda **kwargs: {}),
+        )
+
+    monkeypatch.setattr(bridge.Runtime, "generate", generate)
+    generator = Generator(config["generation"])
+    generator.generate("deck", {"slides": [{"slide_number": 3}]}, None, tmp_path, "deck")
+    usage = json.loads((tmp_path / "deck.usage.json").read_text("utf-8"))
+    assert usage["prompt_profile"] == generator.content_profile.provenance()
+    assert usage["prompt_profile"]["name"] == name
