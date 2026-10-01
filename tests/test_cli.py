@@ -9,6 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from powerpoint_note import __version__
+from powerpoint_note.cli import config_lines
 from powerpoint_note.logging_utils import SUCCESS, ColorFormatter, configure, supports_color
 
 
@@ -40,10 +41,27 @@ def test_entrypoint_help_version_and_e2e(deck_path, tmp_path):
 
 def test_cli_config_show_readonly_and_error(tmp_path):
     show = run_cli("config", "show", cwd=tmp_path)
-    assert show.returncode == 0 and json.loads(show.stdout)["effective_schema_version"] == "2.1.0"
+    assert show.returncode == 0, show.stderr
+    assert "effective_schema_version=2.1.0" in show.stdout.splitlines()
+    assert "config.selection.sections=[]" in show.stdout.splitlines()
+    assert any(
+        line.startswith("winning_sources.generation.max_slides=")
+        for line in show.stdout.splitlines()
+    )
+    machine = run_cli("config", "show", "--json", cwd=tmp_path)
+    assert machine.returncode == 0
+    assert json.loads(machine.stdout)["effective_schema_version"] == "2.1.0"
     bad = run_cli("export", "missing.pptx", cwd=tmp_path)
     assert bad.returncode != 0 and json.loads(bad.stdout)["status"] == "failed"
     assert "Traceback" not in bad.stderr
+
+
+def test_config_lines_preserve_windows_paths_and_flatten_nested_values():
+    lines = config_lines({"path": r"C:\Users\ExampleUser\profiles", "items": [{"active": True}]})
+    assert lines == [
+        r"path=C:\Users\ExampleUser\profiles",
+        "items[0].active=true",
+    ]
 
 
 @pytest.mark.parametrize(

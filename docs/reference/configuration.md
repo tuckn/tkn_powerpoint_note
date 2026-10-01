@@ -2,6 +2,7 @@
 
 The installed package contains [config.example.yaml](../../src/powerpoint_note/resources/config.example.yaml).
 Run `tkn-powerpoint-note config init` to create a user copy; run `config show` to inspect values and winning sources.
+`config show` prints one `key=value` entry per line. Nested keys use dots, list items use `[0]`, and Windows paths display with a single backslash so values can be copied. Empty lists/maps appear as `[]`/`{}`. Use `config show --json` for the original structured JSON output.
 Configuration is optional for ordinary extraction.
 
 Files merge in this order: built-in → `~/.tkn/powerpoint_note/config.yaml` → current directory's `.tkn/config.yaml` → `--config` → CLI options.

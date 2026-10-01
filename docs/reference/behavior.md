@@ -108,7 +108,7 @@ Summary size is checked after slide analyses exist during a real export; that fu
 
 `inspect`, `verify` and `config show` are read-only.
 `config init` writes only the selected config path and preserves existing edits.
-Normal exports write by default. Results use one JSON object on stdout and leveled progress on stderr.
+Normal exports write by default. Results use one JSON object on stdout except `config show`, which prints one `key=value` entry per line by default (`--json` restores JSON). Leveled progress goes to stderr.
 Exit codes: 0 success, 2 input/configuration/protection or expected I/O failure, 1 unexpected processing failure.
 `--help` and `--version` work without loading configuration.
 

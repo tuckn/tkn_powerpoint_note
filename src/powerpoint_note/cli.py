@@ -1,4 +1,4 @@
-"""The public, file-oriented CLI. Progress on stderr; one JSON result on stdout."""
+"""The public, file-oriented CLI. Progress on stderr; JSON results except config show."""
 
 from __future__ import annotations
 
@@ -156,6 +156,7 @@ def make_parser() -> argparse.ArgumentParser:
     show = config_sub.add_parser("show", help="Read effective settings and winning sources.")
     common(show)
     show.add_argument("--generator", help="Inspect effective settings for a named generator.")
+    show.add_argument("--json", action="store_true", help="Print the full result as JSON.")
     return parser
 
 
@@ -177,6 +178,31 @@ def overrides(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
         if value is not None:
             result.setdefault(group, {})[key] = value
     return result
+
+
+def config_lines(value: Any, prefix: str = "") -> list[str]:
+    """Flatten config data into copyable key=value lines without escaping path separators."""
+    if isinstance(value, dict):
+        if not value:
+            return [f"{prefix}={{}}"]
+        return [
+            line
+            for key, item in value.items()
+            for line in config_lines(item, f"{prefix}.{key}" if prefix else key)
+        ]
+    if isinstance(value, list):
+        if not value:
+            return [f"{prefix}=[]"]
+        return [
+            line
+            for index, item in enumerate(value)
+            for line in config_lines(item, f"{prefix}[{index}]")
+        ]
+    if isinstance(value, str):
+        display = value.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    else:
+        display = json.dumps(value, ensure_ascii=False)
+    return [f"{prefix}={display}"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -217,7 +243,10 @@ def main(argv: list[str] | None = None) -> int:
                     refresh=args.refresh,
                 )
         logger.log(SUCCESS, "%s", result.get("status", "success"))
-        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        if args.command == "config" and args.config_command == "show" and not args.json:
+            print("\n".join(config_lines(result)))
+        else:
+            print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
     except NoteError as exc:
         logger.error("%s", exc)

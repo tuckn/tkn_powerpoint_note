@@ -153,7 +153,16 @@ def test_cli_generator_changes_note_language_and_is_inspectable(deck_path, tmp_p
     output = tmp_path / "english.md"
     shown = run_cli("config", "show", "--config", path, "--generator", "my-codex-en", cwd=tmp_path)
     assert shown.returncode == 0, shown.stderr
-    report = json.loads(shown.stdout)
+    assert "selected_generator=my-codex-en" in shown.stdout.splitlines()
+    assert "config.generation.prompt_profile=default-en" in shown.stdout.splitlines()
+    assert any(
+        line.startswith("sources[") and line.endswith(f"].path={path.resolve()}")
+        for line in shown.stdout.splitlines()
+    )
+    assert f"winning_sources.generation.prompt_profile={path.resolve()}" in shown.stdout.splitlines()
+    machine = run_cli("config", "show", "--config", path, "--generator", "my-codex-en", "--json", cwd=tmp_path)
+    assert machine.returncode == 0, machine.stderr
+    report = json.loads(machine.stdout)
     assert report["selected_generator"] == "my-codex-en"
     assert report["config"]["generation"]["prompt_profile"] == "default-en"
     exported = run_cli(

@@ -45,7 +45,7 @@ tkn-powerpoint-note verify "C:\path\to\deck.pptx.md"
 
 `--dry-run` を付けると、入力・選択範囲・設定・既存ノートの保護条件を確認し、変更予定だけを表示します。
 ファイル作成、PowerPoint の起動、認証、通信、AI 呼び出しは行いません。
-標準出力には結果の JSON、標準エラーには進捗を出力します。
+標準出力には結果の JSON（`config show` は項目ごとの表示）、標準エラーには進捗を出力します。
 成功時は終了コード 0、失敗時は非 0 になります。
 
 ## 対象スライドを選び、context を生成する
@@ -103,6 +103,9 @@ tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2-3" --context
 tkn-powerpoint-note config init
 tkn-powerpoint-note config show
 ```
+
+`config show` は `config.generation.max_slides=10` のように1項目ずつ改行して表示します。
+Windows パスは `\` を重ねず表示します。JSON が必要な場合は `config show --json` を使えます。
 
 保存先は `~/.tkn/powerpoint_note/config.yaml` です。
 編集済みの設定ファイルは上書きしません。

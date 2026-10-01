@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Print `config show` as copyable `key=value` lines by default, with unescaped Windows paths; add `--json` for structured output.
 - Include GenAI Bridge and Windows-only pywin32 in standard dependencies, so `uv tool install .` also prepares `--context`. The separate `context` extra is removed; existing installations should use `uv tool install . --reinstall`. Desktop PowerPoint and AI connection settings are still required for visual context.
 
 0.4.0:
