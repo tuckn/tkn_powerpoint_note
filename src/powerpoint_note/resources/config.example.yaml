@@ -1,0 +1,22 @@
+schema_version: "1.0.0"
+
+# No source catalog or pull/push synchronization.
+selection:
+  slides: null
+  sections: []
+  include_hidden: false
+  off_slide: exclude # exclude or append; fully outside shapes only
+
+extraction:
+  include_notes: true
+  include_comments: true
+  max_file_mb: 100
+  max_uncompressed_mb: 1024
+
+generation:
+  bridge_profile: codex-default
+  language: ja # ja or en
+  max_slides: 10 # safety limit per context build; never silently truncate
+  max_input_chars: 120000
+  image_width: 2400
+  render_timeout_seconds: 180

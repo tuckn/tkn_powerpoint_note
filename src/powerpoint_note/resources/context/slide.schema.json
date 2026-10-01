@@ -1,0 +1,46 @@
+{
+  "type": "object",
+  "properties": {
+    "slide_number": {
+      "type": "integer"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "heading": {
+            "type": "string",
+            "minLength": 1
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "heading",
+          "body"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "uncertainties": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "slide_number",
+    "summary",
+    "sections",
+    "uncertainties"
+  ],
+  "additionalProperties": false
+}
