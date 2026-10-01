@@ -87,7 +87,7 @@ Unknown selections fail before output or AI calls. Only the selected content pro
 
 `overrides` accepts `model` and `reasoning_effort` (nonempty strings or `null`), `timeout_seconds` (positive finite number up to 86400), `max_output_tokens` (positive integer or `null`) and `local_only` (boolean).
 Provider-specific combinations are checked by GenAI Bridge when `--context` is used; for example, output-token limits require an API provider.
-These scalar settings can be validated during ordinary extraction without installing context dependencies.
+These scalar settings can be validated during ordinary extraction without loading GenAI Bridge or calling AI. Context dependencies are included in the standard installation.
 Rendering/selection limits and `profile_dirs` remain shared `generation` settings.
 
 Generator selection also controls the template language during ordinary extraction; AI remains opt-in with `--context`.

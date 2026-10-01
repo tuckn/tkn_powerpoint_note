@@ -30,7 +30,7 @@ def preflight() -> None:
             pass
     except (ImportError, OSError) as exc:
         raise NoteError(
-            "Install desktop PowerPoint and reinstall with uv tool install '.[context]' --reinstall"
+            "Check desktop PowerPoint installation and Python dependencies; reinstall with uv tool install . --reinstall"
         ) from exc
 
 

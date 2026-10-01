@@ -43,7 +43,7 @@ class Generator:
             self.bridge = importlib.import_module("tkn_genai_bridge")
         except ImportError as exc:
             raise NoteError(
-                "Install context dependencies: uv tool install '.[context]' --reinstall"
+                "GenAI Bridge could not be imported; reinstall with uv tool install . --reinstall"
             ) from exc
         try:
             self.profile = self.bridge.load_profile(

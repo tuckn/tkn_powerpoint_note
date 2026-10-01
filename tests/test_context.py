@@ -14,7 +14,8 @@ from powerpoint_note.render import check_renderable
 
 @pytest.fixture
 def bridge(monkeypatch):
-    bridge = pytest.importorskip("tkn_genai_bridge")
+    import tkn_genai_bridge as bridge
+
     monkeypatch.setattr(
         bridge,
         "load_profile",

@@ -10,10 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Tuckn" }]
-dependencies = ["PyYAML>=6.0.2", "defusedxml>=0.7.1", "jsonschema>=4.23,<5"]
-
-[project.optional-dependencies]
-context = [
+dependencies = [
+  "PyYAML>=6.0.2",
+  "defusedxml>=0.7.1",
+  "jsonschema>=4.23,<5",
   "tkn-genai-bridge @ https://github.com/tuckn/tkn_genai_bridge/archive/9cf534e47159901c3bb05bb802695fad746cc338.zip",
   "pywin32>=308; sys_platform == 'win32'",
 ]

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Include GenAI Bridge and Windows-only pywin32 in standard dependencies, so `uv tool install .` also prepares `--context`. The separate `context` extra is removed; existing installations should use `uv tool install . --reinstall`. Desktop PowerPoint and AI connection settings are still required for visual context.
+
 0.4.0:
 
 - Add generation.default_generator, named generation.generators and --generator for export/config show.

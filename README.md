@@ -21,12 +21,8 @@ tkn-powerpoint-note --version
 
 バージョン番号が表示されれば、インストールを確認できます。
 通常の文字抽出には、PowerPoint 本体や AI の契約・設定は不要です。
-視覚的な context を生成する場合は、Windows とデスクトップ版 Microsoft PowerPoint を用意し、追加の依存関係をインストールします。
-
-```shell
-cd "C:\path\to\tkn_powerpoint_note"
-uv tool install ".[context]" --reinstall
-```
+GenAI Bridge と、Windows 用の画像化に必要な Python 依存関係は、`uv tool install .` でまとめてインストールされます。
+視覚的な context を生成する場合は、Windows とデスクトップ版 Microsoft PowerPoint を用意します。
 
 画像を扱える [GenAI Bridge](https://github.com/tuckn/tkn_genai_bridge) の接続設定と認証も必要です。
 接続先・モデルは `~/.tkn/genai_bridge/config.yaml` に設定します。
@@ -169,7 +165,7 @@ tkn-powerpoint-note config show --generator my-codex-en
 
 ```shell
 cd "C:\path\to\tkn_powerpoint_note"
-uv sync --locked --all-extras
+uv sync --locked
 uv run pytest
 uv run ruff check .
 uv run mypy src
@@ -185,4 +181,3 @@ uv build
 Office による画像化は Windows 専用です。
 文字抽出は移植可能な構成ですが、実動作の確認環境は Windows です。
 ソースや同梱リソースを更新した後は、`uv tool install . --reinstall` で再インストールしてください。
-視覚的な context を使う場合は、インストール対象を `".[context]"` にします。
