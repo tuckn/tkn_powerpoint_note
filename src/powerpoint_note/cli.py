@@ -1,4 +1,4 @@
-"""The public, file-oriented CLI. Progress on stderr; JSON results except config show."""
+"""The public, file-oriented CLI. Progress on stderr; JSON results except config list."""
 
 from __future__ import annotations
 
@@ -153,10 +153,10 @@ def make_parser() -> argparse.ArgumentParser:
     common(init)
     init.add_argument("--output", type=Path, help="Explicit alternative config output.")
     init.add_argument("--dry-run", action="store_true", help="Preview without creating files.")
-    show = config_sub.add_parser("show", help="Read effective settings and winning sources.")
-    common(show)
-    show.add_argument("--generator", help="Inspect effective settings for a named generator.")
-    show.add_argument("--json", action="store_true", help="Print the full result as JSON.")
+    listing = config_sub.add_parser("list", help="List effective settings and winning sources.")
+    common(listing)
+    listing.add_argument("--generator", help="Inspect effective settings for a named generator.")
+    listing.add_argument("--json", action="store_true", help="Print the full result as JSON.")
     return parser
 
 
@@ -242,8 +242,12 @@ def main(argv: list[str] | None = None) -> int:
                     force=args.force,
                     refresh=args.refresh,
                 )
-        logger.log(SUCCESS, "%s", result.get("status", "success"))
-        if args.command == "config" and args.config_command == "show" and not args.json:
+        listing = args.command == "config" and args.config_command == "list"
+        if listing:
+            logger.info("Showing resolved configuration")
+        else:
+            logger.log(SUCCESS, "%s", result.get("status", "success"))
+        if listing and not args.json:
             print("\n".join(config_lines(result)))
         else:
             print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))

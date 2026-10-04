@@ -39,18 +39,22 @@ def test_entrypoint_help_version_and_e2e(deck_path, tmp_path):
     assert json.loads(verified.stdout)["status"] == "verified"
 
 
-def test_cli_config_show_readonly_and_error(tmp_path):
-    show = run_cli("config", "show", cwd=tmp_path)
-    assert show.returncode == 0, show.stderr
-    assert "effective_schema_version=2.1.0" in show.stdout.splitlines()
-    assert "config.selection.sections=[]" in show.stdout.splitlines()
+def test_cli_config_list_readonly_and_error(tmp_path):
+    listing = run_cli("config", "list", cwd=tmp_path)
+    assert listing.returncode == 0, listing.stderr
+    assert listing.stderr == "[INFO] Showing resolved configuration\n"
+    assert "effective_schema_version=2.1.0" in listing.stdout.splitlines()
+    assert "config.selection.sections=[]" in listing.stdout.splitlines()
     assert any(
         line.startswith("winning_sources.generation.max_slides=")
-        for line in show.stdout.splitlines()
+        for line in listing.stdout.splitlines()
     )
-    machine = run_cli("config", "show", "--json", cwd=tmp_path)
+    machine = run_cli("config", "list", "--json", cwd=tmp_path)
     assert machine.returncode == 0
+    assert machine.stderr == "[INFO] Showing resolved configuration\n"
     assert json.loads(machine.stdout)["effective_schema_version"] == "2.1.0"
+    quiet = run_cli("config", "list", "--quiet", cwd=tmp_path)
+    assert quiet.returncode == 0 and quiet.stderr == ""
     bad = run_cli("export", "missing.pptx", cwd=tmp_path)
     assert bad.returncode != 0 and json.loads(bad.stdout)["status"] == "failed"
     assert "Traceback" not in bad.stderr
@@ -65,7 +69,7 @@ def test_config_lines_preserve_windows_paths_and_flatten_nested_values():
 
 
 @pytest.mark.parametrize(
-    "args", [["--quiet", "--verbose", "config", "show"], ["--quiet", "config", "show", "--verbose"]]
+    "args", [["--quiet", "--verbose", "config", "list"], ["--quiet", "config", "list", "--verbose"]]
 )
 def test_quiet_verbose_mutually_exclusive(tmp_path, args):
     result = run_cli(*args, cwd=tmp_path)
@@ -77,6 +81,8 @@ def test_removed_build_and_unsupported_sync_commands(tmp_path):
     for command in ("build", "pull", "push"):
         result = run_cli(command, "--help", cwd=tmp_path)
         assert result.returncode == 2
+    old_config = run_cli("config", "show", cwd=tmp_path)
+    assert old_config.returncode == 2
 
 
 def test_log_format_color_and_levels(monkeypatch):

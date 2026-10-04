@@ -1,8 +1,8 @@
 # Configuration
 
 The installed package contains [config.example.yaml](../../src/powerpoint_note/resources/config.example.yaml).
-Run `tkn-powerpoint-note config init` to create a user copy; run `config show` to inspect values and winning sources.
-`config show` prints one `key=value` entry per line. Nested keys use dots, list items use `[0]`, and Windows paths display with a single backslash so values can be copied. Empty lists/maps appear as `[]`/`{}`. Use `config show --json` for the original structured JSON output.
+Run `tkn-powerpoint-note config init` to create a user copy; run `config list` to inspect values and winning sources.
+`config list` prints one `key=value` entry per line. Nested keys use dots, list items use `[0]`, and Windows paths display with a single backslash so values can be copied. Empty lists/maps appear as `[]`/`{}`. Use `config list --json` for the original structured JSON output.
 Configuration is optional for ordinary extraction.
 
 Files merge in this order: built-in → `~/.tkn/powerpoint_note/config.yaml` → current directory's `.tkn/config.yaml` → `--config` → CLI options.
@@ -77,7 +77,7 @@ generation:
 
 ```shell
 tkn-powerpoint-note export "C:\path\to\deck.pptx" --generator my-codex-en --context
-tkn-powerpoint-note config show --generator my-codex-en
+tkn-powerpoint-note config list --generator my-codex-en
 ```
 
 Selection is CLI `--generator` → `generation.default_generator`. `null` uses the shared settings.
@@ -93,7 +93,7 @@ Rendering/selection limits and `profile_dirs` remain shared `generation` setting
 
 Generator selection also controls the template language during ordinary extraction; AI remains opt-in with `--context`.
 Flat `generation.bridge_profile` / `prompt_profile` settings remain supported and do not require named presets. Configuration reads never migrate or overwrite user files.
-`config show` reports the definitions, selected ID, effective values and per-field winning sources.
+`config list` reports the definitions, selected ID, effective values and per-field winning sources.
 The selected ID appears as `generationGenerator` in note Frontmatter and `generation_generator` in evidence, results and AI usage.
 Context cache keys use resolved settings and the selected ID. Editing an unused preset does not invalidate a note; changing selected settings can regenerate AI explanations. Reviewed/edited notes keep their normal protection.
 
@@ -133,7 +133,7 @@ This loads `C:/path/to/profiles/team-ja/`. Relative directories resolve from the
 Names use lowercase letters, digits, dots, underscores and hyphens, starting with a letter or digit.
 The first matching directory supplies the **whole bundle**. Missing files never fall back individually to packaged files.
 Unknown names and malformed selected bundles fail before Office setup, AI calls or note writes, including dry-run.
-`config show` reports the resolved name, language, version, resource hashes and package/custom source.
+`config list` reports the resolved name, language, version, resource hashes and package/custom source.
 Unselected profiles are neither loaded nor validated.
 
 Keep prompt, schema and template changes consistent. Individual resource path overrides are not supported.

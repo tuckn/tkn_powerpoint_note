@@ -106,9 +106,9 @@ It does not open Office, authenticate, call a provider, make network requests, o
 It reports planned counts and `planned_ai_calls`; actual `ai_calls` remains 0.
 Summary size is checked after slide analyses exist during a real export; that future size cannot be validated in advance.
 
-`inspect`, `verify` and `config show` are read-only.
+`inspect`, `verify` and `config list` are read-only.
 `config init` writes only the selected config path and preserves existing edits.
-Normal exports write by default. Results use one JSON object on stdout except `config show`, which prints one `key=value` entry per line by default (`--json` restores JSON). Leveled progress goes to stderr.
+Normal exports write by default. Results use one JSON object on stdout except `config list`, which prints one `key=value` entry per line by default (`--json` restores JSON). Leveled progress goes to stderr; listing a configuration logs `[INFO] Showing resolved configuration`.
 Exit codes: 0 success, 2 input/configuration/protection or expected I/O failure, 1 unexpected processing failure.
 `--help` and `--version` work without loading configuration.
 

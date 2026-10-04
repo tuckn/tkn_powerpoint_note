@@ -151,7 +151,7 @@ def test_invalid_generator_layer_is_not_hidden_by_later_values(tmp_path):
 def test_cli_generator_changes_note_language_and_is_inspectable(deck_path, tmp_path):
     path = save(tmp_path / "settings.yaml", example())
     output = tmp_path / "english.md"
-    shown = run_cli("config", "show", "--config", path, "--generator", "my-codex-en", cwd=tmp_path)
+    shown = run_cli("config", "list", "--config", path, "--generator", "my-codex-en", cwd=tmp_path)
     assert shown.returncode == 0, shown.stderr
     assert "selected_generator=my-codex-en" in shown.stdout.splitlines()
     assert "config.generation.prompt_profile=default-en" in shown.stdout.splitlines()
@@ -160,7 +160,7 @@ def test_cli_generator_changes_note_language_and_is_inspectable(deck_path, tmp_p
         for line in shown.stdout.splitlines()
     )
     assert f"winning_sources.generation.prompt_profile={path.resolve()}" in shown.stdout.splitlines()
-    machine = run_cli("config", "show", "--config", path, "--generator", "my-codex-en", "--json", cwd=tmp_path)
+    machine = run_cli("config", "list", "--config", path, "--generator", "my-codex-en", "--json", cwd=tmp_path)
     assert machine.returncode == 0, machine.stderr
     report = json.loads(machine.stdout)
     assert report["selected_generator"] == "my-codex-en"
