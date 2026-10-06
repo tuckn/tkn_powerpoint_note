@@ -63,11 +63,12 @@ def test_generated_edits_protected_and_force_backed_up(deck_path, config, tmp_pa
     assert "Visible body" in output.read_text("utf-8")
 
 
-def test_reviewed_note_and_foreign_note(deck_path, config, tmp_path):
+@pytest.mark.parametrize("review_status", ["reviewed", "accepted"])
+def test_reviewed_note_and_foreign_note(deck_path, config, tmp_path, review_status):
     output = tmp_path / "note.md"
     pipeline.build(deck_path, output, config)
     output.write_text(
-        output.read_text("utf-8").replace("reviewStatus: unreviewed", "reviewStatus: reviewed"),
+        output.read_text("utf-8").replace("reviewStatus: unreviewed", f"reviewStatus: {review_status}"),
         encoding="utf-8",
     )
     assert pipeline.build(deck_path, output, config)["status"] == "unchanged"

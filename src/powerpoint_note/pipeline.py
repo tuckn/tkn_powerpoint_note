@@ -14,6 +14,7 @@ from . import __version__
 from .context import Generator
 from .context_profiles import load_profile
 from .extract import read_deck
+from .frontmatter import SCHEMA_VERSION, normalize, now_iso, profile_properties, source_properties
 from .io import atomic_write, digest, file_digest, fingerprint, json_text
 from .markdown import compose, render_body, slide_evidence, split_note
 from .models import Deck, NoteError, Slide
@@ -96,9 +97,16 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
         "build_key"
     ] != metadata.get("buildKey"):
         raise NoteError("Note and evidence provenance disagree")
-    if manifest.get("generation_generator") != metadata.get("generationGenerator"):
+    if (manifest.get("generation_generator") or "") != (metadata.get("generationGenerator") or ""):
         raise NoteError("Note and evidence generation settings provenance disagree")
-    if manifest.get("prompt_profile") != metadata.get("promptProfile"):
+    provenance = manifest.get("prompt_profile")
+    profile_matches = (
+        provenance == metadata.get("promptProfile")
+        if metadata["schemaVersion"] == "1.0.0"
+        else isinstance(provenance, dict)
+        and all(metadata.get(key) == value for key, value in profile_properties(provenance).items())
+    )
+    if not profile_matches:
         raise NoteError("Note and evidence prompt profile provenance disagree")
     original = source or Path(metadata["sourceFile"])
     if not original.is_file() or file_digest(original) != metadata.get("sourceSha256"):
@@ -161,6 +169,9 @@ def build(
     slides = select(deck, config["selection"])
     evidence = _evidence(deck, slides, config)
     existing, old = _existing(output, source, force)
+    # Validate migrations and source dates before any writes, rendering or AI calls.
+    previous = normalize(old) if existing is not None else {}
+    source_fields = source_properties(deck.metadata)
     generator = None
     if context:
         if len(slides) > config["generation"]["max_slides"]:
@@ -191,6 +202,7 @@ def build(
             },
             "context": context,
             "version": __version__,
+            "note_schema_version": SCHEMA_VERSION,
             "prompt_profile": profile.provenance(),
             "connection": generator.plan if generator else None,
         }
@@ -205,7 +217,7 @@ def build(
             "generation_generator": config["generation"].get("generator_id"),
             "ai_calls": 0,
         }
-    if old.get("reviewStatus") == "reviewed" and not force:
+    if old.get("reviewStatus") in {"reviewed", "accepted"} and not force:
         raise NoteError(
             "Reviewed note is protected; choose another --output or use --force with backup"
         )
@@ -304,21 +316,29 @@ def build(
             staging = None
         else:
             body = (folder / "body.md").read_text("utf-8")
+        now = now_iso()
         metadata = {
-            "schemaVersion": "1.0.0",
+            "type": "powerpoint",
+            "schemaVersion": SCHEMA_VERSION,
+            **source_fields,
+            "title": source_fields["title"] or source.stem,
+            "description": previous.get("description", ""),
+            "cover": previous.get("cover", ""),
             "generator": "tkn-powerpoint-note",
             "generatorVersion": __version__,
-            "promptProfile": profile.provenance(),
+            **profile_properties(profile.provenance()),
             "generationGenerator": config["generation"].get("generator_id"),
             "sourceFile": str(source),
             "sourceSha256": deck.source_sha256,
-            "sourceMetadata": deck.metadata,
             "selectedSlides": [s.number for s in slides],
             "context": context,
             "buildKey": build_key,
             "evidencePath": folder.relative_to(output.parent).as_posix(),
             "reviewStatus": "unreviewed",
-            "updated": datetime.now(UTC).isoformat(),
+            "tags": previous.get("tags", []),
+            "created": previous.get("created", "") if existing is not None else now,
+            "updated": now,
+            "noteId": previous.get("noteId") or str(uuid.uuid4()),
         }
         text = compose(existing, metadata, body, profile)
         split_note(text)

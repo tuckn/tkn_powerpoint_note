@@ -83,7 +83,15 @@ tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2-3" --context
 範囲や生成方式ごとに残す場合は、出力先を分けてください。
 
 生成マーカーの外側の文章と、CLI が管理しない Frontmatter 項目は保持します。
-生成部分への手編集と、`reviewStatus: reviewed` のノートは保護します。
+生成部分への手編集と、`reviewStatus: reviewed` / `accepted` のノートは保護します。
+
+Frontmatter は Obsidian 向けの平坦な構造です。先頭は `type` → `schemaVersion` → `title` → `description` → `cover`、
+末尾は `tags` → `created` → `updated` → `noteId` とし、中間を原本情報・選択範囲・生成情報・検証情報にまとめます。
+日時は原則として `"2026-06-21T05:44:56+09:00"` の形式で、日付しか分からない値は日付のまま保持します。
+新規ノートは Frontmatter の後に空行と H1 を置きます。
+旧形式のノートは次回の `export` による再生成時に更新し、`date` を `created` へ引き継ぎます。
+既存の作成日時・ノートID・タグ・表紙・説明・手書き部分を保持し、`date` と `created` の矛盾は上書きせずエラーにします。
+詳細は [Frontmatter仕様](docs/reference/behavior.md#frontmatter) を参照してください。
 
 > [!WARNING]
 > `--force` は旧ノートをバックアップしてから、保護された生成部分を置き換えます。

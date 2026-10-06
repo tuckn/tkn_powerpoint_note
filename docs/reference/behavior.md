@@ -65,9 +65,9 @@ No OCR is performed in ordinary exports. No LibreOffice renderer is currently im
 
 A note has YAML Frontmatter, a single generated block between `powerpoint-note:begin/end` comments,
 and user-editable text outside that block.
-Unknown Frontmatter fields and text outside the markers survive updates.
+Unknown scalar/flat-list Frontmatter fields and text outside the markers survive updates.
 Source metadata and application-owned provenance fields refresh on successful exports.
-Edits inside the generated block and `reviewStatus: reviewed` are protected.
+Edits inside the generated block and `reviewStatus: reviewed` / `accepted` are protected.
 `--force` backs up the old note and replaces protected generated content; it resets review status to unreviewed.
 Unrelated files, unsupported note schemas and a different source identity are never overwritten.
 
@@ -97,6 +97,50 @@ Source and note content are rechecked immediately before publication.
 An application lock prevents competing exports to the same note.
 `verify` checks generated-body hash, bundle file hashes, note/bundle provenance and the current source hash.
 It reports semantic accuracy as not assessed.
+
+### Frontmatter
+
+PowerPoint proxy notes use `type: powerpoint` and `schemaVersion: "2.0.0"`.
+Properties are scalars or flat lists; grouping uses YAML comments and blank lines, never nested mappings.
+
+| Order | Properties |
+| --- | --- |
+| Common note properties | `type`, `schemaVersion`, `title`, `description`, `cover` |
+| Presentation metadata | `subject`, `author`, `keywords`, `categories`, `comments` |
+| Source identity and location | `sourceFile`, `sourceSha256` |
+| Source timestamps | `sourceCreated`, `sourceModified` |
+| Slide selection | `selectedSlides`, `context` |
+| Generation | `generator`, `generatorVersion`, `generationGenerator`, `promptProfile`, `promptProfileVersion`, `promptProfileLanguage`, `promptProfileSha256`, `promptProfileResources`, `reviewStatus` |
+| Evidence and verification | `evidencePath`, `buildKey`, `generatedSha256` |
+| Additional properties | User-defined scalar/flat-list properties, in their existing order |
+| Common file management | `tags`, `created`, `updated`, `noteId` |
+
+The title uses the document title, falling back to the source filename without its extension.
+`subject`, `author`, `comments` come from OOXML subject, creator and description.
+Keywords and categories split on semicolons, preserving commas within a term.
+All original core/application/custom document properties remain in `evidence.json`; only the fields above are projected into Frontmatter.
+`promptProfile` is the profile name. `promptProfileResources` is a flat list of `filename: SHA-256` strings.
+The full structured profile provenance remains in `manifest.json`, and `verify` compares all flat profile fields against it.
+
+New timestamps use JST (`+09:00`) with seconds and double quotes, for example `"2026-06-21T05:44:56+09:00"`.
+Known Frontmatter timestamps normalize to that form on export; fractional seconds are dropped.
+Date-only values remain `"YYYY-MM-DD"`; missing dates stay `""`. Invalid dates and datetimes without a timezone fail before generation; no timezone is guessed.
+Custom date strings (including list elements) are double-quoted without changing their values.
+Versions, empty strings, Obsidian links and strings that resemble YAML numbers/booleans/null are double-quoted.
+Windows paths are single-quoted. Empty lists use `[]`.
+
+New notes receive `created`, `updated`, a UUID `noteId`, empty `description`/`cover`, and `tags: []`.
+Regeneration preserves `created`, `noteId`, description, cover and tags, and refreshes `updated`.
+Schema 1.0.0 remains readable by `verify`; the next regenerating export writes schema 2.0.0.
+An old `date` becomes `created`, preserving its represented date/time (subject to timestamp normalization).
+Conflicting `date`/`created` values, including subsecond differences, fail before writes or AI calls.
+If neither creation field is available, `created` stays empty; the export time is not substituted.
+A missing note ID is assigned once. Unknown nested user properties are rejected without changing the note.
+Use `export --dry-run` to check the update; this does not rewrite existing notes.
+The schema change invalidates the old build cache, so a context export may generate AI content again.
+
+There is a blank line after the closing Frontmatter fence. New notes (and legacy notes with no text before the generated block)
+receive an H1 before the generated block. Existing text outside the markers, including an edited H1, is preserved.
 
 ## Dry-run, output and errors
 

@@ -44,8 +44,9 @@ def test_profile_controls_prompts_and_local_note(
     result = pipeline.build(deck_path, output, config)
     metadata = split_note(output.read_text("utf-8"))[0]
     assert heading in output.read_text("utf-8")
-    assert metadata["promptProfile"] == profile.provenance() == result["prompt_profile"]
-    assert len(metadata["promptProfile"]["resources"]) == len(RESOURCES)
+    assert metadata["promptProfile"] == profile.name
+    assert profile.provenance() == result["prompt_profile"]
+    assert len(metadata["promptProfileResources"]) == len(RESOURCES)
     assert pipeline.verify(output)["status"] == "verified"
 
 

@@ -12,6 +12,7 @@ from urllib.parse import quote
 import yaml
 
 from .context_profiles import ContextProfile
+from .frontmatter import SCHEMA_VERSION, NoteLoader, dump, normalize
 from .io import digest
 from .models import Deck, NoteError, Shape, Slide
 
@@ -186,13 +187,13 @@ def split_note(text: str) -> tuple[dict[str, Any], str, str, str]:
     if not match:
         raise NoteError("Existing file is not a managed note; choose another --output")
     try:
-        metadata = yaml.safe_load(match[1])
+        metadata = yaml.load(match[1], Loader=NoteLoader)
     except yaml.YAMLError as exc:
         raise NoteError("Invalid note Frontmatter; existing note preserved") from exc
     if (
         not isinstance(metadata, dict)
         or metadata.get("generator") != "tkn-powerpoint-note"
-        or metadata.get("schemaVersion") != "1.0.0"
+        or metadata.get("schemaVersion") not in {"1.0.0", SCHEMA_VERSION}
     ):
         raise NoteError("Unrecognized note generator/schema; choose another --output")
     rest = text[match.end() :]
@@ -211,15 +212,20 @@ def compose(
 ) -> str:
     if existing is not None:
         old, before, _, after = split_note(existing)
+        old = normalize(old)
         old.update(metadata)
         metadata = old
     else:
         before = "\n"
         after = "\n\n" + profile.labels["personal"] + "\n"
     metadata["generatedSha256"] = digest(body.encode("utf-8"))
+    if not before.strip():
+        before = "\n# " + line(str(metadata["title"])) + "\n\n"
+    elif not before.startswith("\n"):
+        before = "\n" + before
     return (
         "---\n"
-        + yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False).rstrip()
+        + dump(metadata).rstrip()
         + "\n---\n"
         + before
         + BEGIN

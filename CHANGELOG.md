@@ -5,6 +5,13 @@
 - Rename `config show` to `config list` and print copyable `key=value` lines by default, with unescaped Windows paths; add `--json` for structured output. Listing logs at INFO level.
 - Include GenAI Bridge and Windows-only pywin32 in standard dependencies, so `uv tool install .` also prepares `--context`. The separate `context` extra is removed; existing installations should use `uv tool install . --reinstall`. Desktop PowerPoint and AI connection settings are still required for visual context.
 
+## 0.6.0
+
+- Align PowerPoint Frontmatter with the Vault/Excel proxy-note layout: fixed common head/tail fields, comment-separated groups and flat Obsidian properties (note schema 2.0.0).
+- Replace legacy `date` with `created`, preserve note identity and user properties, normalize known timestamps to quoted JST seconds, and reject ambiguous dates before generation.
+- Add a blank line after Frontmatter and an H1 for new notes; retain legacy verification and compare flattened profile provenance against evidence.
+- Protect `reviewStatus: accepted` alongside `reviewed`. Existing notes change only on explicit export; schema changes invalidate the build cache.
+
 0.4.0:
 
 - Add generation.default_generator, named generation.generators and --generator for export/config show.
