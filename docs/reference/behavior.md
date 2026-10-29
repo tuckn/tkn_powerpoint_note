@@ -152,8 +152,9 @@ Summary size is checked after slide analyses exist during a real export; that fu
 
 `inspect`, `verify` and `config list` are read-only.
 `config init` writes only the selected config path and preserves existing edits.
-Normal exports write by default. Results use one JSON object on stdout except `config list`, which prints one `key=value` entry per line by default (`--json` restores JSON). Leveled progress goes to stderr; listing a configuration logs `[INFO] Showing resolved configuration`.
-Exit codes: 0 success, 2 input/configuration/protection or expected I/O failure, 1 unexpected processing failure.
+Normal exports write by default. All commands print one `key=value` entry per line on stdout by default; `--json` prints one JSON object instead. Nested fields use dots and list indexes use `[0]`. Paths are complete and unescaped in text output; control characters are escaped. JSON keys, types, and underlying results retain their existing meanings. Leveled progress goes to stderr; listing a configuration logs `[INFO] Showing resolved configuration`. Quiet and verbose affect only stderr logs, and output format never depends on TTY or redirection. No details are omitted, so `--full-output` is unnecessary.
+For a failed command, `status=failed`, `error`, and available `source_path`, `note_path`, `output_path`, or `config_path` fields are separate. Exit codes: 0 success, 2 input/configuration/protection or expected I/O failure, 1 unexpected processing failure, 130 interruption. Help and version retain their usual output.
+The same display rules apply to `inspect`, `export`, `verify`, `config init`, and `config list`. `--json` works before or after commands, including both levels of `config init` and `config list`. CLI formatting does not change the Python API, saved notes, evidence, manifests, or dry-run behavior.
 `--help` and `--version` work without loading configuration.
 
 ## References and implementation basis

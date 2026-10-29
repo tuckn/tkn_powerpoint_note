@@ -1,9 +1,8 @@
-"""The public, file-oriented CLI. Progress on stderr; JSON results except config list."""
+"""The public, file-oriented CLI. Logs on stderr; results on stdout."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -12,6 +11,7 @@ from . import __version__
 from .config import initialize, resolve, user_config
 from .logging_utils import SUCCESS, configure
 from .models import NoteError
+from .output import emit
 from .pipeline import build, default_output, inspect, verify
 
 
@@ -41,6 +41,12 @@ def common(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=argparse.SUPPRESS,
         help="Include diagnostics on stderr.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Print one machine-readable JSON result instead of key=value lines.",
     )
 
 
@@ -156,7 +162,6 @@ def make_parser() -> argparse.ArgumentParser:
     listing = config_sub.add_parser("list", help="List effective settings and winning sources.")
     common(listing)
     listing.add_argument("--generator", help="Inspect effective settings for a named generator.")
-    listing.add_argument("--json", action="store_true", help="Print the full result as JSON.")
     return parser
 
 
@@ -180,36 +185,28 @@ def overrides(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
     return result
 
 
-def config_lines(value: Any, prefix: str = "") -> list[str]:
-    """Flatten config data into copyable key=value lines without escaping path separators."""
-    if isinstance(value, dict):
-        if not value:
-            return [f"{prefix}={{}}"]
-        return [
-            line
-            for key, item in value.items()
-            for line in config_lines(item, f"{prefix}.{key}" if prefix else key)
-        ]
-    if isinstance(value, list):
-        if not value:
-            return [f"{prefix}=[]"]
-        return [
-            line
-            for index, item in enumerate(value)
-            for line in config_lines(item, f"{prefix}[{index}]")
-        ]
-    if isinstance(value, str):
-        display = value.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
-    else:
-        display = json.dumps(value, ensure_ascii=False)
-    return [f"{prefix}={display}"]
+def error_result(message: str, args: argparse.Namespace | None) -> dict[str, Any]:
+    result: dict[str, Any] = {"status": "failed", "error": message}
+    if args is not None:
+        for field in ("source", "note", "output", "config"):
+            value = getattr(args, field, None)
+            if isinstance(value, Path):
+                result[f"{field}_path"] = str(value.expanduser().absolute())
+        if args.command == "config" and args.config_command == "init":
+            result.setdefault("output_path", str(user_config().expanduser().absolute()))
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    option_tokens = argv[: argv.index("--")] if "--" in argv else argv
+    json_output = "--json" in option_tokens
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
-    logger = configure()
+    logger = configure(quiet="--quiet" in option_tokens or "-q" in option_tokens,
+                       verbose="--verbose" in option_tokens or "-v" in option_tokens)
+    args: argparse.Namespace | None = None
     try:
         args = make_parser().parse_args(argv)
         if getattr(args, "quiet", False) and getattr(args, "verbose", False):
@@ -229,9 +226,10 @@ def main(argv: list[str] | None = None) -> int:
                 generator=getattr(args, "generator", None),
             )
             if args.command == "config":
-                result = {"config": config, **details}
+                result = {"status": "success", "config": config, **details}
             elif args.command == "inspect":
                 result = inspect(args.source.expanduser().resolve(), config)
+                result = {"source": str(args.source.expanduser().resolve()), **result}
             else:
                 result = build(
                     args.source,
@@ -247,22 +245,23 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("Showing resolved configuration")
         else:
             logger.log(SUCCESS, "%s", result.get("status", "success"))
-        if listing and not args.json:
-            print("\n".join(config_lines(result)))
-        else:
-            print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        emit(result, json_output=json_output)
         return 0
     except NoteError as exc:
         logger.error("%s", exc)
-        print(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False))
+        emit(error_result(str(exc), args), json_output=json_output)
         return 2
     except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.error("Cannot complete command (%s): %s", type(exc).__name__, exc)
         logger.debug("Diagnostic traceback", exc_info=True)
-        print(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False))
+        emit(error_result(str(exc), args), json_output=json_output)
         return 2
+    except KeyboardInterrupt:
+        logger.error("Interrupted")
+        emit(error_result("interrupted", args), json_output=json_output)
+        return 130
     except Exception as exc:
         logger.error("Processing failed (%s); use --verbose for diagnostics", type(exc).__name__)
         logger.debug("Diagnostic traceback", exc_info=True)
-        print(json.dumps({"status": "failed", "error": type(exc).__name__}, ensure_ascii=False))
+        emit(error_result(type(exc).__name__, args), json_output=json_output)
         return 1

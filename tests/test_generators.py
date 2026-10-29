@@ -174,6 +174,7 @@ def test_cli_generator_changes_note_language_and_is_inspectable(deck_path, tmp_p
         "my-codex-en",
         "--output",
         output,
+        "--json",
         cwd=tmp_path,
     )
     assert exported.returncode == 0, exported.stderr
@@ -192,6 +193,7 @@ def test_cli_generator_changes_note_language_and_is_inspectable(deck_path, tmp_p
         "--output",
         planned_output,
         "--dry-run",
+        "--json",
         cwd=tmp_path,
     )
     assert planned.returncode == 0, planned.stderr

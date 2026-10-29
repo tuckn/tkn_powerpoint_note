@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 0.7.0 prints all CLI results as copyable `key=value` lines by default. `--json` selects structured output before or after nested commands and applies to errors and interruption. Result paths are separate from error messages; exit codes, saved artifacts, and dry-run behavior are unchanged.
 - Rename `config show` to `config list` and print copyable `key=value` lines by default, with unescaped Windows paths; add `--json` for structured output. Listing logs at INFO level.
 - Include GenAI Bridge and Windows-only pywin32 in standard dependencies, so `uv tool install .` also prepares `--context`. The separate `context` extra is removed; existing installations should use `uv tool install . --reinstall`. Desktop PowerPoint and AI connection settings are still required for visual context.
 

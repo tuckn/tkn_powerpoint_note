@@ -45,8 +45,17 @@ tkn-powerpoint-note verify "C:\path\to\deck.pptx.md"
 
 `--dry-run` を付けると、入力・選択範囲・設定・既存ノートの保護条件を確認し、変更予定だけを表示します。
 ファイル作成、PowerPoint の起動、認証、通信、AI 呼び出しは行いません。
-標準出力には結果の JSON（`config list` は項目ごとの表示）、標準エラーには進捗を出力します。
-成功時は終了コード 0、失敗時は非 0 になります。
+標準出力には1行1項目の `key=value` 形式で最終結果を出力し、標準エラーには進捗を出力します。
+機械処理には `--json` を明示します。`--json` はコマンドの前後に指定でき、通常表示とJSONで処理内容・終了コードは変わりません。
+`--quiet` / `--verbose` はログ量だけを変えます。出力形式はパイプやリダイレクトでも自動切替しません。
+通常の成功は終了コード0、入力・設定などの予期される失敗は2、予期しない失敗は1、中断は130です。
+結果には `status` と対象を示す項目を含め、エラー時は `error` と対象パスを別項目に表示します。
+このCLIは一覧項目を省略しないため、`--full-output` は設けていません。
+
+```shell
+tkn-powerpoint-note inspect "C:\path\to\deck.pptx"
+tkn-powerpoint-note --json inspect "C:\path\to\deck.pptx"
+```
 
 ## 対象スライドを選び、context を生成する
 
