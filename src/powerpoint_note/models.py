@@ -52,6 +52,7 @@ class Deck:
     metadata: dict[str, Any]
     slides: list[Slide]
     warnings: list[str] = field(default_factory=list)
+    content_fingerprint: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

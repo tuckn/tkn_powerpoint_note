@@ -87,6 +87,10 @@ tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2-3" --context
 
 原本を保存した後、同じ `export` を再実行すると更新できます。
 入力と生成条件が同一なら、既存の根拠を検証して再利用し、`unchanged` を返します。
+`contextSourceFingerprint` に解析したPowerPoint内容の指紋、`contextProfiles` に使用profile（例: `default-ja`）を残します。
+原本・対象範囲・AI生成条件が同じなら、ノート形式・表示テンプレート・ツールのバージョンだけの変更ではVLMを再実行しません。
+文書プロパティやZIPの格納方法だけの変更でも解析結果を再利用し、原本メタデータとファイル全体の `sourceSha256` は更新します。
+明示的に再解析する場合は `--context --refresh` を指定します。ノートと `.assets` を一緒に保持してください。
 生成部分は今回の選択範囲で置き換わり、以前の別範囲を蓄積する方式ではありません。
 `--context` を付けずに再生成すると、以前のノートに AI の説明があっても、抽出のみの内容になります。
 範囲や生成方式ごとに残す場合は、出力先を分けてください。
@@ -95,10 +99,12 @@ tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2-3" --context
 生成部分への手編集と、`reviewStatus: reviewed` / `accepted` のノートは保護します。
 
 Frontmatter は Obsidian 向けの平坦な構造です。先頭は `type` → `schemaVersion` → `title` → `description` → `cover`、
-末尾は `tags` → `created` → `updated` → `noteId` とし、中間を原本情報・選択範囲・生成情報・検証情報にまとめます。
+末尾は `tags` → `created` → `updated` → `noteId` とし、中間を原本情報・選択範囲・context生成情報・検証情報にまとめます。
+PowerPointのメタデータは `title`・`subject`・`author`・`keywords`・`categories`・`comments`・`sourceCreated`・`sourceModified` として展開します。
+Excel側と同じ `sourceFileName`・`sourceFullPath`、`contextStatus`・`contextAnalyzedSlides`・`contextOmittedSlides`・`contextGeneratedAt` も記録します。
 日時は原則として `"2026-06-21T05:44:56+09:00"` の形式で、日付しか分からない値は日付のまま保持します。
 新規ノートは Frontmatter の後に空行と H1 を置きます。
-旧形式のノートは次回の `export` による再生成時に更新し、`date` を `created` へ引き継ぎます。
+旧形式のノートは次回の `export` 時にschema 2.1.0へ更新し、`sourceMetadata` を平坦化、`date` を `created` へ引き継ぎます。
 既存の作成日時・ノートID・タグ・表紙・説明・手書き部分を保持し、`date` と `created` の矛盾は上書きせずエラーにします。
 詳細は [Frontmatter仕様](docs/reference/behavior.md#frontmatter) を参照してください。
 

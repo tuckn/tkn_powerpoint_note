@@ -83,8 +83,11 @@ Source paths are absolute in Frontmatter; use `verify --source FILE` to verify a
 Private evidence belongs outside version control. This repository ignores `.local/`, which is for retained development evidence.
 Source packages are not retained in successful bundles.
 
-Build keys include source bytes, selected evidence/settings, generator version, selected generation preset, selected content profile identity/resource hashes and connection settings. Unselected generator definitions are excluded.
-Any source byte change invalidates the bundle, including changes to unselected slides.
+Build keys include source bytes, selected evidence/settings, generator version, note schema, selected generation preset, selected content profile identity/resource hashes and connection settings. Unselected generator definitions are excluded.
+Any source byte change invalidates the Markdown bundle. A change only to document properties or ZIP bookkeeping can reuse visual context while refreshing the source metadata and `sourceSha256`.
+Context also has a separate `context_build_key` in the manifest: it includes the source content fingerprint, extracted slide evidence/selection, profile name/language, prompts, response schemas, generation settings and connection plan. It excludes document metadata, file size/raw hash, note schema, tool version, Markdown templates, profile search directories and execution limits. This lets an export rebuild note properties or display templates using verified context JSON/images without rendering or calling AI again. The original `contextGeneratedAt` is retained.
+`contextSourceFingerprint` hashes sorted OOXML package entry names and decompressed bytes, excluding directory entries and `docProps/core.xml`, `docProps/app.xml`, `docProps/custom.xml`. ZIP order, compression and entry timestamps do not affect it. Slide parts, images, charts, notes, comments, themes, layouts and all other package entries participate, including unselected slides. A fingerprint alone never authorizes reuse: AI inputs/settings and bundle checksums must also match. `sourceSha256` independently hashes the entire original file for exact verification. Changes to OOXML bytes (including formatting within XML) outside the excluded properties conservatively require fresh analysis.
+Reuse is local to the existing note and its assets; there is no global cache across different output paths.
 There is no per-slide incremental synchronization or accumulation across selections.
 Identical exports verify existing artifacts and return unchanged.
 `--refresh` creates a distinct context bundle with fresh calls.
@@ -100,16 +103,17 @@ It reports semantic accuracy as not assessed.
 
 ### Frontmatter
 
-PowerPoint proxy notes use `type: powerpoint` and `schemaVersion: "2.0.0"`.
+PowerPoint proxy notes use `type: powerpoint` and `schemaVersion: "2.1.0"`.
 Properties are scalars or flat lists; grouping uses YAML comments and blank lines, never nested mappings.
 
 | Order | Properties |
 | --- | --- |
 | Common note properties | `type`, `schemaVersion`, `title`, `description`, `cover` |
 | Presentation metadata | `subject`, `author`, `keywords`, `categories`, `comments` |
-| Source identity and location | `sourceFile`, `sourceSha256` |
+| Source identity and location | `sourceFileName`, `sourceFullPath`, `sourceFile`, `sourceSha256` |
 | Source timestamps | `sourceCreated`, `sourceModified` |
 | Slide selection | `selectedSlides`, `context` |
+| Context generation | `contextStatus`, `contextProfiles`, `contextAnalyzedSlides`, `contextOmittedSlides`, `contextSourceFingerprint`, `contextGeneratedAt` |
 | Generation | `generator`, `generatorVersion`, `generationGenerator`, `promptProfile`, `promptProfileVersion`, `promptProfileLanguage`, `promptProfileSha256`, `promptProfileResources`, `reviewStatus` |
 | Evidence and verification | `evidencePath`, `buildKey`, `generatedSha256` |
 | Additional properties | User-defined scalar/flat-list properties, in their existing order |
@@ -121,6 +125,8 @@ Keywords and categories split on semicolons, preserving commas within a term.
 All original core/application/custom document properties remain in `evidence.json`; only the fields above are projected into Frontmatter.
 `promptProfile` is the profile name. `promptProfileResources` is a flat list of `filename: SHA-256` strings.
 The full structured profile provenance remains in `manifest.json`, and `verify` compares all flat profile fields against it.
+`sourceFileName` and `sourceFullPath` follow the Excel note naming; `sourceFile` remains an equal full-path compatibility alias. There is no source catalog, so `sourceId`/`sourceRoot` are not fabricated.
+`contextProfiles` lists the profile used by the context currently in the note (for example `[default-ja]`); selections/profiles replace prior content rather than accumulating it. `contextStatus` is `current` when all presentation slides were analyzed, `partial` when some were omitted (including hidden slides), or `not-generated` for extraction-only output. Analyzed/omitted lists contain 1-based slide positions. Extraction-only output clears the context lists, fingerprint and generated timestamp. `verify` checks these properties against the completed bundle.
 
 New timestamps use JST (`+09:00`) with seconds and double quotes, for example `"2026-06-21T05:44:56+09:00"`.
 Known Frontmatter timestamps normalize to that form on export; fractional seconds are dropped.
@@ -131,13 +137,13 @@ Windows paths are single-quoted. Empty lists use `[]`.
 
 New notes receive `created`, `updated`, a UUID `noteId`, empty `description`/`cover`, and `tags: []`.
 Regeneration preserves `created`, `noteId`, description, cover and tags, and refreshes `updated`.
-Schema 1.0.0 remains readable by `verify`; the next regenerating export writes schema 2.0.0.
+Schemas 1.0.0 and 2.0.0 remain readable by `verify`; the next export writes schema 2.1.0, expanding legacy `sourceMetadata` and nested profile provenance into flat properties.
 An old `date` becomes `created`, preserving its represented date/time (subject to timestamp normalization).
 Conflicting `date`/`created` values, including subsecond differences, fail before writes or AI calls.
 If neither creation field is available, `created` stays empty; the export time is not substituted.
 A missing note ID is assigned once. Unknown nested user properties are rejected without changing the note.
 Use `export --dry-run` to check the update; this does not rewrite existing notes.
-The schema change invalidates the old build cache, so a context export may generate AI content again.
+Legacy context bundles without `context_build_key` are reused when their original build key can be reproduced using the recorded tool version, a supported older note schema and the current inputs/settings. If that match cannot be established, a context export plans fresh AI calls; check `--dry-run` first. Existing reviewed/accepted protection still applies to migrations.
 
 There is a blank line after the closing Frontmatter fence. New notes (and legacy notes with no text before the generated block)
 receive an H1 before the generated block. Existing text outside the markers, including an edited H1, is preserved.
@@ -145,7 +151,7 @@ receive an H1 before the generated block. Existing text outside the markers, inc
 ## Dry-run, output and errors
 
 `export --dry-run` reads the input/config/current note, resolves selection and checks protection.
-For context, it additionally checks local Office availability, linked resources, Bridge settings/executable and evidence limits.
+For context, it additionally checks Bridge settings/executable and evidence limits. Office availability and linked resources are checked when fresh rendering is required; verified context reuse does not require PowerPoint.
 It does not open Office, authenticate, call a provider, make network requests, or write data/cache/report/state files.
 It reports planned counts and `planned_ai_calls`; actual `ai_calls` remains 0.
 Summary size is checked after slide analyses exist during a real export; that future size cannot be validated in advance.

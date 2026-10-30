@@ -193,7 +193,7 @@ def split_note(text: str) -> tuple[dict[str, Any], str, str, str]:
     if (
         not isinstance(metadata, dict)
         or metadata.get("generator") != "tkn-powerpoint-note"
-        or metadata.get("schemaVersion") not in {"1.0.0", SCHEMA_VERSION}
+        or metadata.get("schemaVersion") not in {"1.0.0", "2.0.0", SCHEMA_VERSION}
     ):
         raise NoteError("Unrecognized note generator/schema; choose another --output")
     rest = text[match.end() :]

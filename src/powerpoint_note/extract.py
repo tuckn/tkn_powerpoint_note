@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import posixpath
 from io import BytesIO
@@ -42,6 +43,19 @@ class Package:
             raise NoteError("Uncompressed presentation exceeds extraction.max_uncompressed_mb")
         self.names = set(self.zip.namelist())
         self.cache: dict[str, Element] = {}
+
+    def content_fingerprint(self) -> str:
+        """Hash package content without ZIP bookkeeping or document properties."""
+        result = hashlib.sha256()
+        properties = {"docProps/core.xml", "docProps/app.xml", "docProps/custom.xml"}
+        for name in sorted(self.names):
+            if name in properties or name.endswith("/"):
+                continue
+            result.update(name.encode("utf-8"))
+            result.update(b"\0")
+            result.update(self.zip.read(name))
+            result.update(b"\0")
+        return result.hexdigest()
 
     def xml(self, name: str) -> Element:
         if name not in self.names:
@@ -422,7 +436,15 @@ def read_deck(path: Path, settings: dict[str, Any]) -> Deck:
                 for e in pkg.xml(name).iter():
                     if e.get("id") is not None:
                         authors[e.get("id", "")] = e.get("name", e.get("displayName", ""))
-        deck = Deck(digest(data), len(data), width, height, metadata, [])
+        deck = Deck(
+            digest(data),
+            len(data),
+            width,
+            height,
+            metadata,
+            [],
+            content_fingerprint=pkg.content_fingerprint(),
+        )
         relationships = pkg.rels("ppt/presentation.xml")
         seen = set()
         for number, sid in enumerate(root.findall("p:sldIdLst/p:sldId", NS), 1):

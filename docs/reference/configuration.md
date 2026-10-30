@@ -146,7 +146,7 @@ Schemas must be self-contained: references, including remote references, are rej
 Reserved `powerpoint-note:` management markers belong to the application and cannot occur in profile resources.
 
 The selected bundle's name, version and all eight resource hashes participate in the build key.
-Changing any selected resource can cause regeneration, including new AI calls for a context export.
+Changing any selected resource can rebuild the note. Context exports reuse verified analysis when only Markdown templates or display labels change; prompt/schema, profile name/language or AI setting changes require new calls.
 The note Frontmatter, evidence manifest and AI usage records retain bundle provenance.
 Editing an unused profile does not invalidate existing output. Reviewed/edited notes retain their normal protections.
 After changing packaged resources, reinstall a non-editable tool installation; custom profile directories are read directly.

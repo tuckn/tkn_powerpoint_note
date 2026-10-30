@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Extend the Excel-aligned flat Frontmatter with `sourceFileName`/`sourceFullPath` and context status, profiles, slide coverage, source fingerprint and generation time (note schema 2.1.0). Preserve the full-path `sourceFile` alias and legacy schema 1.0.0/2.0.0 reading.
+- Separate AI context reuse from Markdown build keys so schema, tool version and display-template updates reuse verified context without new VLM calls. Migrate matching legacy bundles without AI, preserve the original generation timestamp, and verify context provenance. `--refresh` still forces new calls.
 - 0.7.0 prints all CLI results as copyable `key=value` lines by default. `--json` selects structured output before or after nested commands and applies to errors and interruption. Result paths are separate from error messages; exit codes, saved artifacts, and dry-run behavior are unchanged.
 - Rename `config show` to `config list` and print copyable `key=value` lines by default, with unescaped Windows paths; add `--json` for structured output. Listing logs at INFO level.
 - Include GenAI Bridge and Windows-only pywin32 in standard dependencies, so `uv tool install .` also prepares `--context`. The separate `context` extra is removed; existing installations should use `uv tool install . --reinstall`. Desktop PowerPoint and AI connection settings are still required for visual context.

@@ -10,15 +10,29 @@ import yaml
 
 from .models import NoteError
 
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "2.1.0"
 JST = timezone(timedelta(hours=9))
 HEAD = ("type", "schemaVersion", "title", "description", "cover")
 TAIL = ("tags", "created", "updated", "noteId")
 GROUPS = (
     ("Presentation metadata", ("subject", "author", "keywords", "categories", "comments")),
-    ("Source identity and location", ("sourceFile", "sourceSha256")),
+    (
+        "Source identity and location",
+        ("sourceFileName", "sourceFullPath", "sourceFile", "sourceSha256"),
+    ),
     ("Source timestamps", ("sourceCreated", "sourceModified")),
     ("Slide selection", ("selectedSlides", "context")),
+    (
+        "Context generation",
+        (
+            "contextStatus",
+            "contextProfiles",
+            "contextAnalyzedSlides",
+            "contextOmittedSlides",
+            "contextSourceFingerprint",
+            "contextGeneratedAt",
+        ),
+    ),
     (
         "Generation",
         (
@@ -36,7 +50,7 @@ GROUPS = (
     ("Evidence and verification", ("evidencePath", "buildKey", "generatedSha256")),
 )
 KNOWN = {*HEAD, *TAIL, *(key for _, keys in GROUPS for key in keys)}
-TIMESTAMPS = ("created", "updated", "sourceCreated", "sourceModified")
+TIMESTAMPS = ("created", "updated", "sourceCreated", "sourceModified", "contextGeneratedAt")
 
 
 class NoteLoader(yaml.SafeLoader):

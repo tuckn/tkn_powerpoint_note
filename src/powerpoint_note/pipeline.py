@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,9 +13,16 @@ from typing import Any
 
 from . import __version__
 from .context import Generator
-from .context_profiles import load_profile
+from .context_profiles import ContextProfile, load_profile
 from .extract import read_deck
-from .frontmatter import SCHEMA_VERSION, normalize, now_iso, profile_properties, source_properties
+from .frontmatter import (
+    SCHEMA_VERSION,
+    normalize,
+    now_iso,
+    profile_properties,
+    source_properties,
+    timestamp,
+)
 from .io import atomic_write, digest, file_digest, fingerprint, json_text
 from .markdown import compose, render_body, slide_evidence, split_note
 from .models import Deck, NoteError, Slide
@@ -85,6 +93,32 @@ def validate_bundle(folder: Path) -> dict[str, Any]:
         ) from exc
 
 
+def context_properties(folder: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Describe the context actually retained in a completed evidence bundle."""
+    if "context.json" not in manifest["files"]:
+        return {
+            "contextStatus": "not-generated",
+            "contextProfiles": [],
+            "contextAnalyzedSlides": [],
+            "contextOmittedSlides": [],
+            "contextSourceFingerprint": "",
+            "contextGeneratedAt": "",
+        }
+    evidence = json.loads((folder / "evidence.json").read_text("utf-8"))
+    analyzed = evidence["selected_slides"]
+    omitted = [n for n in range(1, evidence["total_slides"] + 1) if n not in analyzed]
+    return {
+        "contextStatus": "partial" if omitted else "current",
+        "contextProfiles": [manifest["prompt_profile"]["name"]],
+        "contextAnalyzedSlides": analyzed,
+        "contextOmittedSlides": omitted,
+        "contextSourceFingerprint": manifest["context_source_fingerprint"],
+        "contextGeneratedAt": timestamp(
+            manifest.get("context_generated_at", manifest["created_at"]), "contextGeneratedAt"
+        ),
+    }
+
+
 def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
     metadata, _, body, _ = split_note(note.read_text("utf-8-sig"))
     if digest(body.encode()) != metadata.get("generatedSha256"):
@@ -108,6 +142,17 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
     )
     if not profile_matches:
         raise NoteError("Note and evidence prompt profile provenance disagree")
+    if metadata["schemaVersion"] == SCHEMA_VERSION:
+        if any(
+            metadata.get(key) != value
+            for key, value in context_properties(folder, manifest).items()
+        ):
+            raise NoteError("Note and evidence context provenance disagree")
+        if (
+            metadata.get("sourceFullPath") != metadata.get("sourceFile")
+            or metadata.get("sourceFileName") != Path(metadata["sourceFile"]).name
+        ):
+            raise NoteError("Note source location properties disagree")
     original = source or Path(metadata["sourceFile"])
     if not original.is_file() or file_digest(original) != metadata.get("sourceSha256"):
         raise NoteError("Source is missing or changed since this note was built")
@@ -137,6 +182,7 @@ def _evidence(deck: Deck, slides: list[Slide], config: dict[str, Any]) -> dict[s
     return {
         "schema_version": "1.0.0",
         "source_sha256": deck.source_sha256,
+        "source_fingerprint": deck.content_fingerprint,
         "source_size": deck.source_size,
         "dimensions_emu": [deck.width, deck.height],
         "metadata": deck.metadata,
@@ -146,6 +192,79 @@ def _evidence(deck: Deck, slides: list[Slide], config: dict[str, Any]) -> dict[s
         "warnings": deck.warnings,
         "slides": [slide_evidence(s, config["selection"]["off_slide"]) for s in slides],
     }
+
+
+def _context_key(
+    evidence: dict[str, Any], config: dict[str, Any], profile: ContextProfile, plan: dict[str, Any]
+) -> str:
+    """Separate AI inputs from Markdown templates, note schema and tool version."""
+    return fingerprint(
+        {
+            "contract": "1.0.0",
+            "source": evidence["source_fingerprint"],
+            "evidence": {
+                key: value
+                for key, value in evidence.items()
+                if key not in {"source_sha256", "source_size", "metadata"}
+            },
+            "generation": {
+                key: value
+                for key, value in config["generation"].items()
+                if key
+                not in {
+                    "generators",
+                    "default_generator",
+                    "profile_dirs",
+                    "max_slides",
+                    "max_input_chars",
+                    "render_timeout_seconds",
+                }
+            },
+            "profile": {
+                "name": profile.name,
+                "language": profile.language,
+                "prompts": profile.prompts,
+                "schemas": profile.schemas,
+            },
+            "connection": plan,
+        }
+    )
+
+
+def _reusable_context(
+    output: Path,
+    old: dict[str, Any],
+    key: str,
+    build_inputs: dict[str, Any],
+) -> tuple[Path, dict[str, Any]] | None:
+    if not old.get("context"):
+        return None
+    folder = safe_child(output.parent, old["evidencePath"])
+    manifest = validate_bundle(folder)
+    if "context.json" not in manifest["files"]:
+        raise NoteError("Context evidence is missing; restore the bundle before exporting")
+    if manifest.get("context_build_key") == key:
+        return folder, manifest
+    if "context_build_key" in manifest:
+        return None
+    # Legacy bundles have no separate AI key. Prove the entire original build
+    # matches using its recorded tool version and a supported older note schema.
+    for schema in ("1.0.0", "2.0.0"):
+        candidate = {
+            **build_inputs,
+            "evidence": {
+                k: v for k, v in build_inputs["evidence"].items() if k != "source_fingerprint"
+            },
+            "version": manifest["generator_version"],
+            "note_schema_version": schema,
+        }
+        if fingerprint(candidate) == manifest["build_key"]:
+            return folder, manifest
+        if schema == "1.0.0":
+            candidate.pop("note_schema_version")
+            if fingerprint(candidate) == manifest["build_key"]:
+                return folder, manifest
+    return None
 
 
 def build(
@@ -183,31 +302,34 @@ def build(
                 raise NoteError(
                     f"Slide {slide['number']} exceeds generation.max_input_chars; no AI was called"
                 )
-        preflight()
-        check_renderable(source.read_bytes())
         generator = Generator(config["generation"], content_profile=profile)
-    build_key = fingerprint(
-        {
-            "source": deck.source_sha256,
-            "evidence": evidence,
-            "generation": {
-                key: value
-                for key, value in config["generation"].items()
-                if key not in {"generators", "default_generator"}
-            }
-            if context
-            else {
-                "prompt_profile": profile.name,
-                "generator_id": config["generation"].get("generator_id"),
-            },
-            "context": context,
-            "version": __version__,
-            "note_schema_version": SCHEMA_VERSION,
-            "prompt_profile": profile.provenance(),
-            "connection": generator.plan if generator else None,
+    build_inputs = {
+        "source": deck.source_sha256,
+        "evidence": evidence,
+        "generation": {
+            key: value
+            for key, value in config["generation"].items()
+            if key not in {"generators", "default_generator"}
         }
-    )
-    if old.get("buildKey") == build_key and not refresh and not force:
+        if context
+        else {
+            "prompt_profile": profile.name,
+            "generator_id": config["generation"].get("generator_id"),
+        },
+        "context": context,
+        "version": __version__,
+        "note_schema_version": SCHEMA_VERSION,
+        "prompt_profile": profile.provenance(),
+        "connection": generator.plan if generator else None,
+    }
+    build_key = fingerprint(build_inputs)
+    context_key = _context_key(evidence, config, profile, generator.plan) if generator else None
+    if (
+        old.get("schemaVersion") == SCHEMA_VERSION
+        and old.get("buildKey") == build_key
+        and not refresh
+        and not force
+    ):
         verify(output, source)
         return {
             "status": "unchanged",
@@ -228,6 +350,14 @@ def build(
     cached = folder.is_dir() and not refresh
     if cached:
         validate_bundle(folder)
+    reused = (
+        _reusable_context(output, old, context_key, build_inputs)
+        if context_key and not cached and not refresh
+        else None
+    )
+    if context and not cached and not reused:
+        preflight()
+        check_renderable(source.read_bytes())
     status = "updated" if existing is not None else "created"
     result: dict[str, Any] = {
         "status": status,
@@ -239,7 +369,8 @@ def build(
         "context": context,
         "prompt_profile": profile.provenance(),
         "generation_generator": config["generation"].get("generator_id"),
-        "ai_calls": (len(slides) + 1 if context and not cached else 0),
+        "ai_calls": (len(slides) + 1 if context and not cached and not reused else 0),
+        "reused_context": bool(reused),
         "excluded_hidden": sum(s.hidden for s in deck.slides)
         if not config["selection"]["include_hidden"]
         else 0,
@@ -271,7 +402,24 @@ def build(
             staging.mkdir()
             atomic_write(staging / "evidence.json", json_text(evidence))
             contexts = None
-            if generator:
+            context_generated_at = ""
+            if reused:
+                previous_folder, previous_manifest = reused
+                for name in previous_manifest["files"]:
+                    if name not in {"evidence.json", "body.md"}:
+                        destination = safe_child(staging, name)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(safe_child(previous_folder, name), destination)
+                        if file_digest(destination) != previous_manifest["files"][name]:
+                            raise NoteError(
+                                "Context evidence changed during reuse; previous note preserved"
+                            )
+                contexts = json.loads((staging / "context.json").read_text("utf-8"))
+                context_generated_at = previous_manifest.get(
+                    "context_generated_at", previous_manifest["created_at"]
+                )
+                LOGGER.info("Reusing verified visual context; no AI calls.")
+            elif generator:
                 LOGGER.info("Rendering %d selected slides.", len(slides))
                 images = render(
                     source,
@@ -292,6 +440,7 @@ def build(
                 )
                 contexts = {"slides": analyses, "deck": summary}
                 atomic_write(staging / "context.json", json_text(contexts))
+                context_generated_at = now_iso()
             relative = folder.relative_to(output.parent).as_posix()
             body = render_body(
                 deck, slides, relative + "/evidence.json", relative, config, profile, contexts
@@ -305,8 +454,15 @@ def build(
                 "generator_version": __version__,
                 "prompt_profile": profile.provenance(),
                 "generation_generator": config["generation"].get("generator_id"),
+                "context_build_key": context_key,
+                "context_source_fingerprint": deck.content_fingerprint if context else "",
+                "context_generated_at": context_generated_at,
                 "created_at": datetime.now(UTC).isoformat(),
-                "files": {p.name: file_digest(p) for p in staging.iterdir() if p.is_file()},
+                "files": {
+                    p.relative_to(staging).as_posix(): file_digest(p)
+                    for p in staging.rglob("*")
+                    if p.is_file()
+                },
             }
             atomic_write(staging / "manifest.json", json_text(manifest))
             validate_bundle(staging)
@@ -316,6 +472,7 @@ def build(
             staging = None
         else:
             body = (folder / "body.md").read_text("utf-8")
+        manifest = validate_bundle(folder)
         now = now_iso()
         metadata = {
             "type": "powerpoint",
@@ -329,9 +486,12 @@ def build(
             **profile_properties(profile.provenance()),
             "generationGenerator": config["generation"].get("generator_id"),
             "sourceFile": str(source),
+            "sourceFileName": source.name,
+            "sourceFullPath": str(source),
             "sourceSha256": deck.source_sha256,
             "selectedSlides": [s.number for s in slides],
             "context": context,
+            **context_properties(folder, manifest),
             "buildKey": build_key,
             "evidencePath": folder.relative_to(output.parent).as_posix(),
             "reviewStatus": "unreviewed",
