@@ -106,6 +106,21 @@ class FakeGenerator:
 
     def generate(self, stage, evidence, image, folder, name):
         self.calls.append((stage, evidence))
+        (folder / (name + ".usage.json")).write_text(
+            json.dumps(
+                {
+                    **self.plan,
+                    "status": "success",
+                    "record": {
+                        "provider": "test",
+                        "requested_model": "fake",
+                        "response_model": "actual-fake",
+                        "reasoning_effort": "high",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
         if stage == "slide":
             return {
                 "slide_number": evidence["slide"]["number"],
@@ -164,8 +179,8 @@ def test_context_frontmatter_coverage_profiles_and_clear(deck_path, config, tmp_
     metadata = split_note(output.read_text("utf-8"))[0]
     assert metadata["contextStatus"] == "partial"
     assert metadata["contextProfiles"] == ["default-ja"]
-    assert metadata["contextAnalyzedSlides"] == [1, 3]
-    assert metadata["contextOmittedSlides"] == [2]
+    assert metadata["contextAnalyzedSlides"] == "1,3"
+    assert metadata["contextOmittedSlides"] == "2"
     evidence = json.loads(
         (output.parent / metadata["evidencePath"] / "evidence.json").read_text("utf-8")
     )
@@ -178,12 +193,13 @@ def test_context_frontmatter_coverage_profiles_and_clear(deck_path, config, tmp_
     metadata = split_note(output.read_text("utf-8"))[0]
     assert metadata["contextStatus"] == "current"
     assert metadata["contextProfiles"] == ["default-en"]
-    assert metadata["contextAnalyzedSlides"] == [1, 2, 3]
-    assert metadata["contextOmittedSlides"] == []
+    assert metadata["contextAnalyzedSlides"] == "1-3"
+    assert metadata["contextOmittedSlides"] == ""
     pipeline.build(deck_path, output, config)
     metadata = split_note(output.read_text("utf-8"))[0]
     assert metadata["contextStatus"] == "not-generated"
-    assert metadata["contextProfiles"] == metadata["contextAnalyzedSlides"] == []
+    assert metadata["contextProfiles"] == []
+    assert metadata["contextAnalyzedSlides"] == ""
     assert metadata["contextSourceFingerprint"] == metadata["contextGeneratedAt"] == ""
 
 
@@ -242,10 +258,11 @@ def test_legacy_context_migration_avoids_ai(
             }
             if legacy_schema == "1.0.0":
                 value.pop("note_schema_version")
+            else:
+                value["note_schema_version"] = "2.0.0"
         return original_fingerprint(value)
 
     monkeypatch.setattr(pipeline, "fingerprint", legacy_fingerprint)
-    monkeypatch.setattr(pipeline, "SCHEMA_VERSION", "2.0.0")
     monkeypatch.setattr(pipeline, "__version__", "0.6.0")
     output = tmp_path / "context.md"
     pipeline.build(deck_path, output, config, context=True)
@@ -258,6 +275,7 @@ def test_legacy_context_migration_avoids_ai(
     manifest.pop("context_generated_at")
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     metadata["schemaVersion"] = legacy_schema
+    metadata["generator"] = "tkn-powerpoint-note"
     if legacy_schema == "1.0.0":
         for key in list(metadata):
             if key.startswith("promptProfile"):

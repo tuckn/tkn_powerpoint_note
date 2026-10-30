@@ -35,6 +35,7 @@ def test_actual_bridge_request_plan_contract(config, bridge):
     assert generator.plan["provider"] == "codex"
     assert generator.plan["model"] == "test-model"
     assert generator.plan["generation_settings_sha256"]
+    assert generator.plan["reasoning_effort"] is None
 
 
 def test_success_validation_journal_and_no_image_for_summary(config, bridge, monkeypatch, tmp_path):
@@ -50,7 +51,11 @@ def test_success_validation_journal_and_no_image_for_summary(config, bridge, mon
                 "uncertainties": [],
             },
             record=SimpleNamespace(
-                model_dump=lambda **kwargs: {"usage": {"input_tokens": 10, "output_tokens": 5}}
+                model_dump=lambda **kwargs: {
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                    "response_model": "observed-model",
+                    "reasoning_effort": "high",
+                }
             ),
         )
 
@@ -60,6 +65,9 @@ def test_success_validation_journal_and_no_image_for_summary(config, bridge, mon
     assert result["summary"] == "Supported"
     assert len(calls) == 1
     assert json.loads((tmp_path / "deck.usage.json").read_text("utf-8"))["status"] == "success"
+    record = json.loads((tmp_path / "deck.usage.json").read_text("utf-8"))["record"]
+    assert record["response_model"] == "observed-model"
+    assert record["reasoning_effort"] == "high"
 
 
 @pytest.mark.parametrize(

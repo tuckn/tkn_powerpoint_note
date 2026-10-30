@@ -35,6 +35,57 @@ def provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
+def generation_properties(folder: Path, files: dict[str, Any]) -> dict[str, Any]:
+    """Publish actual saved call provenance, including mixed or unknown values."""
+    values: dict[str, list[str]] = {
+        key: []
+        for key in (
+            "generator",
+            "generationProvider",
+            "generationModel",
+            "generationResponseModel",
+            "generationReasoningEffort",
+        )
+    }
+
+    def known(value: Any) -> str:
+        return value if isinstance(value, str) else ""
+
+    if "context.json" in files:
+        for name in sorted(files):
+            if not name.endswith(".usage.json"):
+                continue
+            usage = json.loads((folder / name).read_text("utf-8"))
+            if usage.get("status") != "success":
+                raise NoteError("Completed context contains an unsuccessful usage record")
+            record = usage.get("record", {})
+            provider = known(record.get("provider") or usage.get("provider"))
+            requested = known(record.get("requested_model", usage.get("model")))
+            response = known(record.get("response_model"))
+            effort = known(record.get("reasoning_effort"))
+            model = response or requested
+            row = {
+                "generator": f"{provider} ({model})" if provider and model else provider or model,
+                "generationProvider": provider,
+                "generationModel": requested,
+                "generationResponseModel": response,
+                "generationReasoningEffort": effort,
+            }
+            for key, value in row.items():
+                if value not in values[key]:
+                    values[key].append(value)
+    return {
+        key: ", ".join(items)
+        if key == "generator"
+        else items[0]
+        if len(items) == 1
+        else items
+        if items
+        else ""
+        for key, items in values.items()
+    }
+
+
 class Generator:
     def __init__(self, settings: dict[str, Any], *, content_profile: ContextProfile | None = None):
         self.settings = settings
@@ -70,6 +121,7 @@ class Generator:
                     "timeout_seconds",
                 )
             }
+            self.plan["reasoning_effort"] = plan.model_dump(mode="json").get("reasoning_effort")
         except self.bridge.GenAIError as exc:
             raise NoteError(
                 f"GenAI Bridge configuration failed ({exc.code}); check the bridge profile"

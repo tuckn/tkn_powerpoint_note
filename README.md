@@ -102,9 +102,13 @@ Frontmatter は Obsidian 向けの平坦な構造です。先頭は `type` → `
 末尾は `tags` → `created` → `updated` → `noteId` とし、中間を原本情報・選択範囲・context生成情報・検証情報にまとめます。
 PowerPointのメタデータは `title`・`subject`・`author`・`keywords`・`categories`・`comments`・`sourceCreated`・`sourceModified` として展開します。
 Excel側と同じ `sourceFileName`・`sourceFullPath`、`contextStatus`・`contextAnalyzedSlides`・`contextOmittedSlides`・`contextGeneratedAt` も記録します。
+`selectedSlides`・`contextAnalyzedSlides`・`contextOmittedSlides` は `3-6`、`1-2,7-400` のような範囲文字列で記録します。本文の対象範囲も同じ表記です。
+AI生成時の `generator` は `codex (gpt-6.1-sol)` のように表示し、`generationModel`（指定モデル）・`generationResponseModel`（返却モデル）・`generationReasoningEffort`（Bridgeが返した要求Effort）を保存します。
+Effortの実際の採用値や、取得できなかったモデル名は推測しません。ノート作成ツールは `generatedBy`・`generatedByVersion` に記録します。
 日時は原則として `"2026-06-21T05:44:56+09:00"` の形式で、日付しか分からない値は日付のまま保持します。
 新規ノートは Frontmatter の後に空行と H1 を置きます。
-旧形式のノートは次回の `export` 時にschema 2.1.0へ更新し、`sourceMetadata` を平坦化、`date` を `created` へ引き継ぎます。
+旧形式のノートは次回の `export` 時にschema 3.0.0へ更新し、`sourceMetadata` を平坦化、`date` を `created` へ引き継ぎます。
+今回の表記変更やBridge更新では、生成条件が一致する既存の解析を再利用します。モデル名・Effortは保存済みの各呼び出し記録から復元し、古い記録で未取得なら空欄にします。
 既存の作成日時・ノートID・タグ・表紙・説明・手書き部分を保持し、`date` と `created` の矛盾は上書きせずエラーにします。
 詳細は [Frontmatter仕様](docs/reference/behavior.md#frontmatter) を参照してください。
 

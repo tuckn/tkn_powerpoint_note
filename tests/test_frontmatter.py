@@ -22,7 +22,7 @@ def test_export_order_flat_values_dates_and_heading(deck_path, config, tmp_path)
     keys = list(metadata)
     assert keys[:5] == ["type", "schemaVersion", "title", "description", "cover"]
     assert keys[-4:] == ["tags", "created", "updated", "noteId"]
-    assert metadata["type"] == "powerpoint" and metadata["schemaVersion"] == "2.1.0"
+    assert metadata["type"] == "powerpoint" and metadata["schemaVersion"] == "3.0.0"
     assert metadata["title"] == "Example Deck"
     assert metadata["tags"] == []
     assert UUID(metadata["noteId"])
@@ -31,7 +31,7 @@ def test_export_order_flat_values_dates_and_heading(deck_path, config, tmp_path)
         if isinstance(value, list):
             assert all(not isinstance(item, (dict, list)) for item in value)
     assert "\n---\n\n# Example Deck\n" in text
-    assert 'schemaVersion: "2.1.0"' in text
+    assert 'schemaVersion: "3.0.0"' in text
     assert metadata["sourceFileName"] == deck_path.name
     assert metadata["sourceFullPath"] == metadata["sourceFile"] == str(deck_path.resolve())
     assert metadata["contextStatus"] == "not-generated"
@@ -65,6 +65,7 @@ def test_legacy_export_migrates_date_and_provenance(deck_path, config, tmp_path,
         if not key.startswith("promptProfile") and key not in {"created", "type"}
     }
     legacy.update(
+        generator="tkn-powerpoint-note",
         schemaVersion="1.0.0",
         date=date,
         promptProfile=manifest["prompt_profile"],

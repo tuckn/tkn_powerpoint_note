@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .context import Generator
+from .context import Generator, generation_properties
 from .context_profiles import ContextProfile, load_profile
 from .extract import read_deck
 from .frontmatter import (
@@ -27,7 +27,7 @@ from .io import atomic_write, digest, file_digest, fingerprint, json_text
 from .markdown import compose, render_body, slide_evidence, split_note
 from .models import Deck, NoteError, Slide
 from .render import check_renderable, preflight, render
-from .selection import select
+from .selection import format_slides, select
 
 LOGGER = logging.getLogger("powerpoint_note")
 
@@ -99,8 +99,8 @@ def context_properties(folder: Path, manifest: dict[str, Any]) -> dict[str, Any]
         return {
             "contextStatus": "not-generated",
             "contextProfiles": [],
-            "contextAnalyzedSlides": [],
-            "contextOmittedSlides": [],
+            "contextAnalyzedSlides": "",
+            "contextOmittedSlides": "",
             "contextSourceFingerprint": "",
             "contextGeneratedAt": "",
         }
@@ -110,8 +110,8 @@ def context_properties(folder: Path, manifest: dict[str, Any]) -> dict[str, Any]
     return {
         "contextStatus": "partial" if omitted else "current",
         "contextProfiles": [manifest["prompt_profile"]["name"]],
-        "contextAnalyzedSlides": analyzed,
-        "contextOmittedSlides": omitted,
+        "contextAnalyzedSlides": format_slides(analyzed),
+        "contextOmittedSlides": format_slides(omitted),
         "contextSourceFingerprint": manifest["context_source_fingerprint"],
         "contextGeneratedAt": timestamp(
             manifest.get("context_generated_at", manifest["created_at"]), "contextGeneratedAt"
@@ -125,6 +125,7 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
         raise NoteError("Generated Markdown was edited")
     folder = safe_child(note.parent, metadata["evidencePath"])
     manifest = validate_bundle(folder)
+    evidence = json.loads((folder / "evidence.json").read_text("utf-8"))
     if (folder / "body.md").read_text("utf-8") != body:
         raise NoteError("Note and evidence body disagree")
     if manifest["source_sha256"] != metadata.get("sourceSha256") or manifest[
@@ -142,9 +143,14 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
     )
     if not profile_matches:
         raise NoteError("Note and evidence prompt profile provenance disagree")
-    if metadata["schemaVersion"] == SCHEMA_VERSION:
+    if metadata["schemaVersion"] in {"2.1.0", SCHEMA_VERSION}:
         if any(
-            metadata.get(key) != value
+            (
+                format_slides(metadata.get(key))
+                if key in {"contextAnalyzedSlides", "contextOmittedSlides"}
+                else metadata.get(key)
+            )
+            != value
             for key, value in context_properties(folder, manifest).items()
         ):
             raise NoteError("Note and evidence context provenance disagree")
@@ -153,6 +159,16 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
             or metadata.get("sourceFileName") != Path(metadata["sourceFile"]).name
         ):
             raise NoteError("Note source location properties disagree")
+    if metadata["schemaVersion"] == SCHEMA_VERSION:
+        if any(
+            metadata.get(key) != value
+            for key, value in generation_properties(folder, manifest["files"]).items()
+        ):
+            raise NoteError("Note and evidence model/effort provenance disagree")
+        if metadata.get("selectedSlides") != format_slides(evidence["selected_slides"]):
+            raise NoteError("Note and evidence slide selection disagree")
+        if metadata.get("generatedByVersion") != manifest["generator_version"]:
+            raise NoteError("Note and evidence tool version disagree")
     original = source or Path(metadata["sourceFile"])
     if not original.is_file() or file_digest(original) != metadata.get("sourceSha256"):
         raise NoteError("Source is missing or changed since this note was built")
@@ -160,7 +176,7 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
         "status": "verified",
         "note": str(note),
         "source_sha256": metadata["sourceSha256"],
-        "selected_slides": metadata["selectedSlides"],
+        "selected_slides": evidence["selected_slides"],
         "context": metadata["context"],
         "semantic_accuracy": "not assessed",
     }
@@ -226,7 +242,7 @@ def _context_key(
                 "prompts": profile.prompts,
                 "schemas": profile.schemas,
             },
-            "connection": plan,
+            "connection": {key: value for key, value in plan.items() if key != "reasoning_effort"},
         }
     )
 
@@ -236,6 +252,7 @@ def _reusable_context(
     old: dict[str, Any],
     key: str,
     build_inputs: dict[str, Any],
+    profile: ContextProfile,
 ) -> tuple[Path, dict[str, Any]] | None:
     if not old.get("context"):
         return None
@@ -246,6 +263,29 @@ def _reusable_context(
     if manifest.get("context_build_key") == key:
         return folder, manifest
     if "context_build_key" in manifest:
+        # Bridge version/reporting additions alone must not buy another analysis.
+        # Prove that all generation settings still match the archived slide plan,
+        # then reproduce its key with the historical Bridge version.
+        plan = build_inputs["connection"]
+        for name in sorted(manifest["files"]):
+            if not name.startswith("slide-") or not name.endswith(".usage.json"):
+                continue
+            usage = json.loads(safe_child(folder, name).read_text("utf-8"))
+            compared = set(plan) - {"bridge_version", "reasoning_effort"}
+            if not plan.get("generation_settings_sha256") or any(
+                usage.get(k) != plan[k] for k in compared
+            ):
+                return None
+            historical_plan = {k: usage[k] for k in plan if k != "reasoning_effort" and k in usage}
+            historical_key = _context_key(
+                build_inputs["evidence"],
+                {"generation": build_inputs["generation"]},
+                profile,
+                historical_plan,
+            )
+            if historical_key == manifest["context_build_key"]:
+                return folder, manifest
+            return None
         return None
     # Legacy bundles have no separate AI key. Prove the entire original build
     # matches using its recorded tool version and a supported older note schema.
@@ -351,7 +391,7 @@ def build(
     if cached:
         validate_bundle(folder)
     reused = (
-        _reusable_context(output, old, context_key, build_inputs)
+        _reusable_context(output, old, context_key, build_inputs, profile)
         if context_key and not cached and not refresh
         else None
     )
@@ -481,15 +521,16 @@ def build(
             "title": source_fields["title"] or source.stem,
             "description": previous.get("description", ""),
             "cover": previous.get("cover", ""),
-            "generator": "tkn-powerpoint-note",
-            "generatorVersion": __version__,
+            "generatedBy": "tkn-powerpoint-note",
+            "generatedByVersion": __version__,
+            **generation_properties(folder, manifest["files"]),
             **profile_properties(profile.provenance()),
             "generationGenerator": config["generation"].get("generator_id"),
             "sourceFile": str(source),
             "sourceFileName": source.name,
             "sourceFullPath": str(source),
             "sourceSha256": deck.source_sha256,
-            "selectedSlides": [s.number for s in slides],
+            "selectedSlides": format_slides([s.number for s in slides]),
             "context": context,
             **context_properties(folder, manifest),
             "buildKey": build_key,

@@ -9,8 +9,9 @@ from typing import Any
 import yaml
 
 from .models import NoteError
+from .selection import format_slides
 
-SCHEMA_VERSION = "2.1.0"
+SCHEMA_VERSION = "3.0.0"
 JST = timezone(timedelta(hours=9))
 HEAD = ("type", "schemaVersion", "title", "description", "cover")
 TAIL = ("tags", "created", "updated", "noteId")
@@ -37,7 +38,12 @@ GROUPS = (
         "Generation",
         (
             "generator",
-            "generatorVersion",
+            "generationProvider",
+            "generationModel",
+            "generationResponseModel",
+            "generationReasoningEffort",
+            "generatedBy",
+            "generatedByVersion",
             "generationGenerator",
             "promptProfile",
             "promptProfileVersion",
@@ -160,6 +166,14 @@ def normalize(values: dict[str, Any]) -> dict[str, Any]:
             result.setdefault(key, value)
     if isinstance(result.get("promptProfile"), dict):
         result.update(profile_properties(result["promptProfile"]))
+    if result.get("generator") == "tkn-powerpoint-note":
+        result["generator"] = ""
+        result.setdefault("generatedBy", "tkn-powerpoint-note")
+    if "generatorVersion" in result:
+        result.setdefault("generatedByVersion", result.pop("generatorVersion"))
+    for key in ("selectedSlides", "contextAnalyzedSlides", "contextOmittedSlides"):
+        if key in result:
+            result[key] = format_slides(result[key])
     result.update(type="powerpoint", schemaVersion=SCHEMA_VERSION)
     for key in (*HEAD, *TAIL):
         result.setdefault(key, [] if key == "tags" else "")

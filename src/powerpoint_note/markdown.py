@@ -15,6 +15,7 @@ from .context_profiles import ContextProfile
 from .frontmatter import SCHEMA_VERSION, NoteLoader, dump, normalize
 from .io import digest
 from .models import Deck, NoteError, Shape, Slide
+from .selection import format_slides
 
 BEGIN = "<!-- powerpoint-note:begin -->"
 END = "<!-- powerpoint-note:end -->"
@@ -173,7 +174,7 @@ def render_body(
     return profile.render(
         "note",
         {
-            "coverage": f"{', '.join(str(s.number) for s in slides)} / {len(deck.slides)}",
+            "coverage": f"{format_slides([s.number for s in slides])} / {len(deck.slides)}",
             "mode": words["ai"] if contexts else words["local"],
             "evidence": f"[{words['evidence']}]({quote(evidence_link, safe='/')})",
             "overview": overview,
@@ -192,8 +193,12 @@ def split_note(text: str) -> tuple[dict[str, Any], str, str, str]:
         raise NoteError("Invalid note Frontmatter; existing note preserved") from exc
     if (
         not isinstance(metadata, dict)
-        or metadata.get("generator") != "tkn-powerpoint-note"
-        or metadata.get("schemaVersion") not in {"1.0.0", "2.0.0", SCHEMA_VERSION}
+        or metadata.get("schemaVersion") not in {"1.0.0", "2.0.0", "2.1.0", SCHEMA_VERSION}
+        or (
+            metadata.get("generatedBy") != "tkn-powerpoint-note"
+            if metadata.get("schemaVersion") == SCHEMA_VERSION
+            else metadata.get("generator") != "tkn-powerpoint-note"
+        )
     ):
         raise NoteError("Unrecognized note generator/schema; choose another --output")
     rest = text[match.end() :]

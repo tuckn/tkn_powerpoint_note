@@ -8,6 +8,35 @@ from typing import Any
 from .models import Deck, NoteError, Slide
 
 
+def format_slides(value: Any) -> str:
+    """Canonical compact notation for both legacy lists and range strings."""
+    if value in (None, ""):
+        return ""
+    spans: list[tuple[int, int]] = []
+    if isinstance(value, list):
+        if any(type(n) is not int or n < 1 for n in value):
+            raise NoteError("Slide properties require positive integers or inclusive ranges")
+        spans.extend((n, n) for n in value)
+    elif isinstance(value, str):
+        for item in value.split(","):
+            match = re.fullmatch(r"\s*(\d+)(?:\s*-\s*(\d+))?\s*", item)
+            if match is None:
+                raise NoteError("Invalid slide range property")
+            start, end = int(match[1]), int(match[2] or match[1])
+            if not 1 <= start <= end:
+                raise NoteError("Slide range property must be positive and ascending")
+            spans.append((start, end))
+    else:
+        raise NoteError("Slide properties require a list or range string")
+    ranges: list[list[int]] = []
+    for start, end in sorted(spans):
+        if not ranges or start > ranges[-1][1] + 1:
+            ranges.append([start, end])
+        else:
+            ranges[-1][1] = max(ranges[-1][1], end)
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges)
+
+
 def select(deck: Deck, settings: dict[str, Any]) -> list[Slide]:
     spec = settings["slides"]
     numbers: set[int] | None = None

@@ -2419,8 +2419,8 @@ wheels = [
 
 [[package]]
 name = "tkn-genai-bridge"
-version = "0.10.0"
-source = { url = "https://github.com/tuckn/tkn_genai_bridge/archive/9cf534e47159901c3bb05bb802695fad746cc338.zip" }
+version = "0.11.0"
+source = { url = "https://github.com/tuckn/tkn_genai_bridge/archive/7ac69735ce81e08da9e03cc0051a0f928a256145.zip" }
 dependencies = [
     { name = "azure-identity" },
     { name = "httpx" },
@@ -2431,7 +2431,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "referencing" },
 ]
-sdist = { hash = "sha256:a32e933e4363030f5c135dc56b91ce23e48d1cb04099e0bb1060acdeda0af58e" }
+sdist = { hash = "sha256:f37b0d86ce45b89a8d4d1b773693ef8e4524d1bb7871da7cf2558a382e8e3e3a" }
 
 [package.metadata]
 requires-dist = [
@@ -2473,7 +2473,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=308" },
     { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "tkn-genai-bridge", url = "https://github.com/tuckn/tkn_genai_bridge/archive/9cf534e47159901c3bb05bb802695fad746cc338.zip" },
+    { name = "tkn-genai-bridge", url = "https://github.com/tuckn/tkn_genai_bridge/archive/7ac69735ce81e08da9e03cc0051a0f928a256145.zip" },
 ]
 
 [package.metadata.requires-dev]

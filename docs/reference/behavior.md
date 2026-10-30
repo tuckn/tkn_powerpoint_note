@@ -103,7 +103,7 @@ It reports semantic accuracy as not assessed.
 
 ### Frontmatter
 
-PowerPoint proxy notes use `type: powerpoint` and `schemaVersion: "2.1.0"`.
+PowerPoint proxy notes use `type: powerpoint` and `schemaVersion: "3.0.0"`.
 Properties are scalars or flat lists; grouping uses YAML comments and blank lines, never nested mappings.
 
 | Order | Properties |
@@ -114,7 +114,7 @@ Properties are scalars or flat lists; grouping uses YAML comments and blank line
 | Source timestamps | `sourceCreated`, `sourceModified` |
 | Slide selection | `selectedSlides`, `context` |
 | Context generation | `contextStatus`, `contextProfiles`, `contextAnalyzedSlides`, `contextOmittedSlides`, `contextSourceFingerprint`, `contextGeneratedAt` |
-| Generation | `generator`, `generatorVersion`, `generationGenerator`, `promptProfile`, `promptProfileVersion`, `promptProfileLanguage`, `promptProfileSha256`, `promptProfileResources`, `reviewStatus` |
+| Generation | `generator`, `generationProvider`, `generationModel`, `generationResponseModel`, `generationReasoningEffort`, `generatedBy`, `generatedByVersion`, `generationGenerator`, `promptProfile`, `promptProfileVersion`, `promptProfileLanguage`, `promptProfileSha256`, `promptProfileResources`, `reviewStatus` |
 | Evidence and verification | `evidencePath`, `buildKey`, `generatedSha256` |
 | Additional properties | User-defined scalar/flat-list properties, in their existing order |
 | Common file management | `tags`, `created`, `updated`, `noteId` |
@@ -126,7 +126,11 @@ All original core/application/custom document properties remain in `evidence.jso
 `promptProfile` is the profile name. `promptProfileResources` is a flat list of `filename: SHA-256` strings.
 The full structured profile provenance remains in `manifest.json`, and `verify` compares all flat profile fields against it.
 `sourceFileName` and `sourceFullPath` follow the Excel note naming; `sourceFile` remains an equal full-path compatibility alias. There is no source catalog, so `sourceId`/`sourceRoot` are not fabricated.
-`contextProfiles` lists the profile used by the context currently in the note (for example `[default-ja]`); selections/profiles replace prior content rather than accumulating it. `contextStatus` is `current` when all presentation slides were analyzed, `partial` when some were omitted (including hidden slides), or `not-generated` for extraction-only output. Analyzed/omitted lists contain 1-based slide positions. Extraction-only output clears the context lists, fingerprint and generated timestamp. `verify` checks these properties against the completed bundle.
+`contextProfiles` lists the profile used by the context currently in the note (for example `[default-ja]`); selections/profiles replace prior content rather than accumulating it. `contextStatus` is `current` when all presentation slides were analyzed, `partial` when some were omitted (including hidden slides), or `not-generated` for extraction-only output.
+`selectedSlides`, `contextAnalyzedSlides` and `contextOmittedSlides` are compact strings of 1-based slide positions: `3-6`, `1-2,7-400`, or `""` for no positions. Adjacent positions merge into inclusive ranges; gaps remain comma-separated. Legacy numeric lists normalize on export. The body coverage uses the same notation; JSON evidence and CLI result arrays retain individual numeric positions.
+`generator` describes the saved AI calls, for example `codex (gpt-6.1-sol)`. Each call prefers `record.response_model`, then `record.requested_model`; old records without that field may use the archived plan's model. Unknown models are omitted rather than inferred from current settings. `generationModel` retains the requested model, `generationResponseModel` the returned model, and `generationReasoningEffort` the requested Effort returned in `record.reasoning_effort`. Effort is not proof of the provider's actual execution setting; missing/null/legacy Effort stays `""` even if the current profile sets a value.
+These fields summarize all successful slide and presentation-summary calls from checksummed usage files. Uniform values are scalars. Mixed values are deduplicated flat lists (including `""` for unknown calls); mixed generator descriptions are comma-separated. Original per-call associations remain in `.usage.json`. The summary does not hide a different model used for a slide or the presentation summary. Reusing context preserves the original records and Effort.
+`generatedBy: tkn-powerpoint-note` identifies the note application, and `generatedByVersion` records its version. The former application-valued `generator` and `generatorVersion` migrate to these fields. Extraction-only output clears the AI identity, Effort, context coverage, fingerprint and generated timestamp. `verify` compares the generation fields against saved usage records and the selected/covered ranges against evidence.
 
 New timestamps use JST (`+09:00`) with seconds and double quotes, for example `"2026-06-21T05:44:56+09:00"`.
 Known Frontmatter timestamps normalize to that form on export; fractional seconds are dropped.
@@ -137,13 +141,14 @@ Windows paths are single-quoted. Empty lists use `[]`.
 
 New notes receive `created`, `updated`, a UUID `noteId`, empty `description`/`cover`, and `tags: []`.
 Regeneration preserves `created`, `noteId`, description, cover and tags, and refreshes `updated`.
-Schemas 1.0.0 and 2.0.0 remain readable by `verify`; the next export writes schema 2.1.0, expanding legacy `sourceMetadata` and nested profile provenance into flat properties.
+Schemas 1.0.0, 2.0.0 and 2.1.0 remain readable by `verify`; the next export writes schema 3.0.0, expanding legacy `sourceMetadata` and nested profile provenance into flat properties and compacting slide lists.
 An old `date` becomes `created`, preserving its represented date/time (subject to timestamp normalization).
 Conflicting `date`/`created` values, including subsecond differences, fail before writes or AI calls.
 If neither creation field is available, `created` stays empty; the export time is not substituted.
 A missing note ID is assigned once. Unknown nested user properties are rejected without changing the note.
 Use `export --dry-run` to check the update; this does not rewrite existing notes.
 Legacy context bundles without `context_build_key` are reused when their original build key can be reproduced using the recorded tool version, a supported older note schema and the current inputs/settings. If that match cannot be established, a context export plans fresh AI calls; check `--dry-run` first. Existing reviewed/accepted protection still applies to migrations.
+For bundles with a context key, a Bridge version/reporting-field update can reuse analysis when the archived slide plan matches all other plan fields and the nonempty generation-settings hash, and the historical context key can be reproduced. The added plan Effort field is redundant with the settings hash and does not invalidate context. An actual model/Effort/settings change still requires new calls. Metadata-only migrations never fabricate missing historical model/Effort values.
 
 There is a blank line after the closing Frontmatter fence. New notes (and legacy notes with no text before the generated block)
 receive an H1 before the generated block. Existing text outside the markers, including an edited H1, is preserved.

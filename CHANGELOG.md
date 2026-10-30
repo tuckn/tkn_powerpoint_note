@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Compact Frontmatter slide lists and body coverage into range strings such as `3-6` and `1-2,7-400` (note schema 3.0.0); keep evidence/CLI numeric arrays and read schemas 1.0.0/2.0.0/2.1.0.
+- Record AI provider, requested/returned models and Bridge-returned requested reasoning Effort from saved per-call records. Display `generator: codex (model)` and move application identity/version to `generatedBy`/`generatedByVersion`; preserve unknown and mixed-call values without guessing.
+- Update GenAI Bridge to the Effort-reporting revision and reuse verified legacy context across metadata-only/compatible Bridge reporting updates without new AI calls.
 - Extend the Excel-aligned flat Frontmatter with `sourceFileName`/`sourceFullPath` and context status, profiles, slide coverage, source fingerprint and generation time (note schema 2.1.0). Preserve the full-path `sourceFile` alias and legacy schema 1.0.0/2.0.0 reading.
 - Separate AI context reuse from Markdown build keys so schema, tool version and display-template updates reuse verified context without new VLM calls. Migrate matching legacy bundles without AI, preserve the original generation timestamp, and verify context provenance. `--refresh` still forces new calls.
 - 0.7.0 prints all CLI results as copyable `key=value` lines by default. `--json` selects structured output before or after nested commands and applies to errors and interruption. Result paths are separate from error messages; exit codes, saved artifacts, and dry-run behavior are unchanged.
