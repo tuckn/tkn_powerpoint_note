@@ -16,6 +16,8 @@ from .context import Generator, generation_properties
 from .context_profiles import ContextProfile, load_profile
 from .extract import read_deck
 from .frontmatter import (
+    GENERATED_BY_SCHEMAS,
+    NOTE_TYPE,
     SCHEMA_VERSION,
     normalize,
     now_iso,
@@ -143,7 +145,7 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
     )
     if not profile_matches:
         raise NoteError("Note and evidence prompt profile provenance disagree")
-    if metadata["schemaVersion"] in {"2.1.0", SCHEMA_VERSION}:
+    if metadata["schemaVersion"] in {"2.1.0", *GENERATED_BY_SCHEMAS}:
         if any(
             (
                 format_slides(metadata.get(key))
@@ -159,7 +161,7 @@ def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
             or metadata.get("sourceFileName") != Path(metadata["sourceFile"]).name
         ):
             raise NoteError("Note source location properties disagree")
-    if metadata["schemaVersion"] == SCHEMA_VERSION:
+    if metadata["schemaVersion"] in GENERATED_BY_SCHEMAS:
         if any(
             metadata.get(key) != value
             for key, value in generation_properties(folder, manifest["files"]).items()
@@ -515,7 +517,7 @@ def build(
         manifest = validate_bundle(folder)
         now = now_iso()
         metadata = {
-            "type": "powerpoint",
+            "type": NOTE_TYPE,
             "schemaVersion": SCHEMA_VERSION,
             **source_fields,
             "title": source_fields["title"] or source.stem,

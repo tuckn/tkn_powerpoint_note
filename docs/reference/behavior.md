@@ -103,7 +103,8 @@ It reports semantic accuracy as not assessed.
 
 ### Frontmatter
 
-PowerPoint proxy notes use `type: powerpoint` and `schemaVersion: "3.0.0"`.
+PowerPoint proxy notes use `type: PowerPoint` (unquoted proper noun) and `schemaVersion: "4.0.0"`.
+Notes written with schema 3.0.0 or earlier use `type: powerpoint`; their migration is described later in this section.
 Properties are scalars or flat lists; grouping uses YAML comments and blank lines, never nested mappings.
 
 | Order | Properties |
@@ -141,7 +142,8 @@ Windows paths are single-quoted. Empty lists use `[]`.
 
 New notes receive `created`, `updated`, a UUID `noteId`, empty `description`/`cover`, and `tags: []`.
 Regeneration preserves `created`, `noteId`, description, cover and tags, and refreshes `updated`.
-Schemas 1.0.0, 2.0.0 and 2.1.0 remain readable by `verify`; the next export writes schema 3.0.0, expanding legacy `sourceMetadata` and nested profile provenance into flat properties and compacting slide lists.
+Schemas 1.0.0 through 3.0.0 remain readable by `verify`; the next export writes schema 4.0.0 with `type: PowerPoint`, expanding legacy `sourceMetadata` and nested profile provenance into flat properties and compacting slide lists.
+Matching verified context is reused, so this migration makes no new AI calls.
 An old `date` becomes `created`, preserving its represented date/time (subject to timestamp normalization).
 Conflicting `date`/`created` values, including subsecond differences, fail before writes or AI calls.
 If neither creation field is available, `created` stays empty; the export time is not substituted.

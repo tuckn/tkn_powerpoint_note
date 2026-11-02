@@ -160,7 +160,7 @@ def test_schema_21_upgrade_and_bridge_update_reuse_analysis(
     result = pipeline.build(deck_path, output, config, context=True)
     assert result["ai_calls"] == 0 and len(fake_context.calls) == calls
     new = split_note(output.read_text("utf-8"))[0]
-    assert new["schemaVersion"] == "3.0.0"
+    assert new["schemaVersion"] == "4.0.0" and new["type"] == "PowerPoint"
     assert new["selectedSlides"] == "1,3"
     assert new["generator"] == "test"
     assert new["generationReasoningEffort"] == ""

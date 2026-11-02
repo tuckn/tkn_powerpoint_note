@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Write the proxy-note `type` as the unquoted proper noun `PowerPoint` and raise the note schema to 4.0.0 (breaking for filters on `type: powerpoint`). Notes with schemas 1.0.0–3.0.0 stay readable and are rewritten on the next export without new AI calls; update external scripts or Bases that filter on `type: powerpoint`.
 - Compact Frontmatter slide lists and body coverage into range strings such as `3-6` and `1-2,7-400` (note schema 3.0.0); keep evidence/CLI numeric arrays and read schemas 1.0.0/2.0.0/2.1.0.
 - Record AI provider, requested/returned models and Bridge-returned requested reasoning Effort from saved per-call records. Display `generator: codex (model)` and move application identity/version to `generatedBy`/`generatedByVersion`; preserve unknown and mixed-call values without guessing.
 - Update GenAI Bridge to the Effort-reporting revision and reuse verified legacy context across metadata-only/compatible Bridge reporting updates without new AI calls.

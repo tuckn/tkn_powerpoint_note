@@ -11,7 +11,11 @@ import yaml
 from .models import NoteError
 from .selection import format_slides
 
-SCHEMA_VERSION = "3.0.0"
+SCHEMA_VERSION = "4.0.0"
+# Schemas whose application identity is stored in generatedBy/generatedByVersion.
+GENERATED_BY_SCHEMAS = frozenset({"3.0.0", SCHEMA_VERSION})
+# Proper noun: keep the product capitalization. Schemas up to 3.0.0 used "powerpoint".
+NOTE_TYPE = "PowerPoint"
 JST = timezone(timedelta(hours=9))
 HEAD = ("type", "schemaVersion", "title", "description", "cover")
 TAIL = ("tags", "created", "updated", "noteId")
@@ -174,7 +178,7 @@ def normalize(values: dict[str, Any]) -> dict[str, Any]:
     for key in ("selectedSlides", "contextAnalyzedSlides", "contextOmittedSlides"):
         if key in result:
             result[key] = format_slides(result[key])
-    result.update(type="powerpoint", schemaVersion=SCHEMA_VERSION)
+    result.update(type=NOTE_TYPE, schemaVersion=SCHEMA_VERSION)
     for key in (*HEAD, *TAIL):
         result.setdefault(key, [] if key == "tags" else "")
     for key in TIMESTAMPS:

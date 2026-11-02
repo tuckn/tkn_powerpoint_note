@@ -308,6 +308,39 @@ def test_legacy_context_migration_avoids_ai(
     assert pipeline.verify(output)["status"] == "verified"
 
 
+def test_schema_3_note_moves_to_proper_noun_type_without_ai(
+    deck_path, config, tmp_path, fake_context, monkeypatch
+):
+    original_fingerprint = pipeline.fingerprint
+
+    def schema_3_key(value):
+        if isinstance(value, dict) and "note_schema_version" in value:
+            value = {**value, "note_schema_version": "3.0.0"}
+        return original_fingerprint(value)
+
+    monkeypatch.setattr(pipeline, "fingerprint", schema_3_key)
+    output = tmp_path / "note.md"
+    pipeline.build(deck_path, output, config, context=True)
+    text = output.read_text("utf-8")
+    old = split_note(text)[0]
+    old.update(type="powerpoint", schemaVersion="3.0.0")
+    output.write_text(
+        "---\n" + yaml.safe_dump(old) + "---\n" + text.split("\n---\n", 1)[1], encoding="utf-8"
+    )
+    assert pipeline.verify(output)["status"] == "verified"
+    calls = len(fake_context.calls)
+    monkeypatch.setattr(pipeline, "fingerprint", original_fingerprint)
+    monkeypatch.setattr(pipeline, "preflight", lambda: pytest.fail("Migration must not render"))
+    result = pipeline.build(deck_path, output, config, context=True)
+    assert result["ai_calls"] == 0 and len(fake_context.calls) == calls
+    migrated_text = output.read_text("utf-8")
+    migrated = split_note(migrated_text)[0]
+    assert migrated["type"] == "PowerPoint" and migrated["schemaVersion"] == "4.0.0"
+    assert migrated_text.startswith("---\ntype: PowerPoint\n")
+    assert migrated["noteId"] == old["noteId"] and migrated["created"] == old["created"]
+    assert pipeline.verify(output)["status"] == "verified"
+
+
 @pytest.mark.parametrize("change", ["properties", "zip-container"])
 def test_document_properties_and_zip_changes_reuse_context(
     deck_path, config, tmp_path, fake_context, monkeypatch, change

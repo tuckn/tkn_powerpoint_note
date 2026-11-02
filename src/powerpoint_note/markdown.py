@@ -12,7 +12,7 @@ from urllib.parse import quote
 import yaml
 
 from .context_profiles import ContextProfile
-from .frontmatter import SCHEMA_VERSION, NoteLoader, dump, normalize
+from .frontmatter import GENERATED_BY_SCHEMAS, NoteLoader, dump, normalize
 from .io import digest
 from .models import Deck, NoteError, Shape, Slide
 from .selection import format_slides
@@ -193,10 +193,10 @@ def split_note(text: str) -> tuple[dict[str, Any], str, str, str]:
         raise NoteError("Invalid note Frontmatter; existing note preserved") from exc
     if (
         not isinstance(metadata, dict)
-        or metadata.get("schemaVersion") not in {"1.0.0", "2.0.0", "2.1.0", SCHEMA_VERSION}
+        or metadata.get("schemaVersion") not in {"1.0.0", "2.0.0", "2.1.0", *GENERATED_BY_SCHEMAS}
         or (
             metadata.get("generatedBy") != "tkn-powerpoint-note"
-            if metadata.get("schemaVersion") == SCHEMA_VERSION
+            if metadata.get("schemaVersion") in GENERATED_BY_SCHEMAS
             else metadata.get("generator") != "tkn-powerpoint-note"
         )
     ):
