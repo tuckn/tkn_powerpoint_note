@@ -1,6 +1,6 @@
-# tkn-powerpoint-note: Tkn PowerPoint Note — PowerPoint を Markdown にする
+# Tkn PowerPoint Note — PowerPoint を Markdown にする
 
-PowerPoint の内容を、人と生成 AI が理解・参照できる Markdown ノートにします。
+`tkn-powerpoint-note` は、PowerPoint の内容を、人と生成 AI が理解・参照できる Markdown ノートにします。
 通常は文字と構造をローカルで抽出し、`--context` を付けるとスライド画像から図・矢印・配置・色の意味を文章化します。
 
 たとえば、構成図に描かれたシステム同士の関係とその意味を説明し、元のスライド番号へ戻れるノートを作れます。
