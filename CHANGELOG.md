@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Update GenAI Bridge to 27ac8e4. Claude Code calls no longer add an empty folder under `~/.claude/projects` for every call, and when a forced termination leaves a temporary folder behind (it may hold copies of the input images), the first generation of the next run removes it. Folders left by the earlier Bridge version are not removed.
 - Write the proxy-note `type` as the unquoted proper noun `PowerPoint` and raise the note schema to 4.0.0 (breaking for filters on `type: powerpoint`). Notes with schemas 1.0.0–3.0.0 stay readable and are rewritten on the next export without new AI calls; update external scripts or Bases that filter on `type: powerpoint`.
 - Compact Frontmatter slide lists and body coverage into range strings such as `3-6` and `1-2,7-400` (note schema 3.0.0); keep evidence/CLI numeric arrays and read schemas 1.0.0/2.0.0/2.1.0.
 - Record AI provider, requested/returned models and Bridge-returned requested reasoning Effort from saved per-call records. Display `generator: codex (model)` and move application identity/version to `generatedBy`/`generatedByVersion`; preserve unknown and mixed-call values without guessing.

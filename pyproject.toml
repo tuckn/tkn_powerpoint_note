@@ -14,7 +14,7 @@ dependencies = [
   "PyYAML>=6.0.2",
   "defusedxml>=0.7.1",
   "jsonschema>=4.23,<5",
-  "tkn-genai-bridge @ https://github.com/tuckn/tkn_genai_bridge/archive/7ac69735ce81e08da9e03cc0051a0f928a256145.zip",
+  "tkn-genai-bridge @ https://github.com/tuckn/tkn_genai_bridge/archive/27ac8e48c8038ee86e029f5b845cd41f6da121af.zip",
   "pywin32>=308; sys_platform == 'win32'",
 ]
 
