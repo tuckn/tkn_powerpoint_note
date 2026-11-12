@@ -86,7 +86,7 @@ Add new names for other providers such as Ollama or Azure OpenAI.
 Fields follow the pinned GenAI Bridge `Profile`: `provider`, `model`, `reasoning_effort`, `timeout_seconds`, `max_output_tokens`, `local_only`, `cli`, `ollama`, `azure` and `pricing`.
 See the [GenAI Bridge configuration reference](https://github.com/tuckn/tkn_genai_bridge/blob/27ac8e48c8038ee86e029f5b845cd41f6da121af/docs/reference/configuration.md) for their meaning.
 Names use letters/digits with optional `.`, `_` and `-`, starting with a letter or digit.
-Each file's fields are validated before merging; when any file defines `genai_profiles`, every merged connection is also validated as a whole.
+Each file's fields are validated before merging. Required fields of a nested entry, such as a `pricing.<model>` entry, may be split across files and are checked after merging; when any file defines `genai_profiles`, every merged connection is also validated as a whole.
 Unknown fields, wrong types and invalid provider combinations are errors.
 A relative `cli.executable` path resolves from the folder of the file that sets it; a bare command such as `claude` is found on `PATH`.
 

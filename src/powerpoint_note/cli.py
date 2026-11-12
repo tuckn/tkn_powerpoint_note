@@ -20,6 +20,28 @@ class Parser(argparse.ArgumentParser):
         raise NoteError(message)
 
 
+class Replaced(argparse.Action):
+    """Hidden removed option that fails with the option that replaced it."""
+
+    def __init__(self, option_strings: list[str], dest: str, replacement: str) -> None:
+        self.replacement = replacement
+        super().__init__(
+            option_strings, dest, nargs="?", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+        )
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> NoReturn:
+        parser.error(
+            f"{option_string} was replaced by {self.replacement}; "
+            "define connections in genai_profiles"
+        )
+
+
 def common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--config",
@@ -135,6 +157,7 @@ def make_parser() -> argparse.ArgumentParser:
         "--genai-profile",
         help="Connection name in genai_profiles (default: codex-default).",
     )
+    create.add_argument("--bridge-profile", action=Replaced, replacement="--genai-profile")
     create.add_argument(
         "--prompt-profile",
         help="Content profile: default-ja (default), default-en, or a complete custom bundle.",

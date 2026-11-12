@@ -196,4 +196,5 @@ def test_cli_profile_selection_and_removed_language_option(deck_path, tmp_path):
     bad = run_cli("export", deck_path, "--language", "en", cwd=tmp_path)
     assert bad.returncode == 2
     removed = run_cli("export", deck_path, "--bridge-profile", "codex-default", cwd=tmp_path)
-    assert removed.returncode == 2 and "--bridge-profile" in removed.stderr
+    assert removed.returncode == 2
+    assert "--bridge-profile was replaced by --genai-profile" in removed.stderr

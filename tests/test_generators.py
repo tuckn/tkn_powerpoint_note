@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -332,3 +333,70 @@ def test_old_bridge_settings_fail_with_migration_steps(tmp_path):
     with pytest.raises(NoteError, match="rename bridge_profile to genai_profile"):
         resolve(path, home=tmp_path / "home", cwd=tmp_path / "cwd")
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("generation", "where"),
+    [
+        ({"bridge_profile": "codex-default"}, "generation.bridge_profile"),
+        (
+            {"generators": {"named": {"bridge_profile": "codex-default"}}},
+            "generation.generators.named.bridge_profile",
+        ),
+    ],
+)
+def test_bridge_profile_in_current_schema_names_its_replacement(tmp_path, generation, where):
+    path = save(
+        tmp_path / "new.yaml",
+        yaml.safe_dump({"schema_version": "3.0.0", "generation": generation}),
+    )
+    with pytest.raises(NoteError, match=f"{re.escape(where)} was renamed to genai_profile"):
+        resolve(path, home=tmp_path / "home", cwd=tmp_path / "cwd")
+
+
+def test_unknown_override_points_to_genai_profiles(tmp_path):
+    path = save(
+        tmp_path / "override.yaml",
+        yaml.safe_dump({"schema_version": "3.0.0", "generation": {"overrides": {"provider": "x"}}}),
+    )
+    with pytest.raises(NoteError, match="unknown key provider; define other connection settings"):
+        resolve(path, home=tmp_path / "home", cwd=tmp_path / "cwd")
+
+
+PRICING = {
+    "currency": "JPY",
+    "pricing_date": "2026-09-17",
+    "input_per_million": 300.0,
+    "output_per_million": 1900.0,
+}
+
+
+def test_nested_pricing_merges_by_field_and_is_checked_after_merging(tmp_path):
+    home, cwd = tmp_path / "home", tmp_path / "cwd"
+
+    def layer(path, connection):
+        document = {"schema_version": "3.0.0", "genai_profiles": {"azure": connection}}
+        return save(path, yaml.safe_dump(document))
+
+    layer(
+        home / ".tkn/powerpoint_note/config.yaml",
+        {
+            "provider": "azure-openai",
+            "model": "m",
+            "azure": {"endpoint": "https://example.invalid/openai/v1"},
+            "pricing": {"m": PRICING},
+        },
+    )
+    explicit = layer(tmp_path / "price.yaml", {"pricing": {"m": {"input_per_million": 318.64}}})
+    config, _ = resolve(explicit, home=home, cwd=cwd)
+    assert config["genai_profiles"]["azure"]["pricing"]["m"] == {
+        **PRICING,
+        "input_per_million": 318.64,
+    }
+    # A partial entry must be complete after merging; a wrong type fails in its own layer.
+    incomplete = layer(tmp_path / "part.yaml", {"pricing": {"other": {"input_per_million": 1.0}}})
+    with pytest.raises(NoteError, match="genai_profiles.azure: invalid connection settings"):
+        resolve(incomplete, home=home, cwd=cwd)
+    wrong = layer(tmp_path / "wrong.yaml", {"pricing": {"m": {"input_per_million": "318"}}})
+    with pytest.raises(NoteError, match="genai_profiles.azure: invalid value for pricing"):
+        resolve(wrong, home=home, cwd=cwd)

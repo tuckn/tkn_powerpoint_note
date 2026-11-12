@@ -17,6 +17,10 @@ from .io import atomic_write
 from .models import NoteError
 
 SCHEMA_VERSION = "3.0.0"
+RENAMED_BRIDGE_PROFILE = (
+    "bridge_profile was renamed to genai_profile in config 3.0.0; "
+    "define the connection in genai_profiles"
+)
 GENERATOR_DEFAULTS: dict[str, Any] = {
     "genai_profile": "codex-default",
     "prompt_profile": "default-ja",
@@ -65,9 +69,13 @@ def _validate_genai_profiles(values: Any, label: str) -> None:
                 raise NoteError(f"{location}: unknown key {key}")
             try:
                 TypeAdapter(fields[key].rebuild_annotation()).validate_python(value, strict=True)
-            except ValidationError:
-                # Pydantic messages can include values; report the field only.
-                raise NoteError(f"{location}: invalid value for {key}") from None
+            except ValidationError as exc:
+                # A layer may set only part of a nested entry (such as one pricing field);
+                # required fields are checked after merging. Messages can include values,
+                # so report the field only.
+                errors = exc.errors(include_input=False, include_url=False)
+                if any(error["type"] != "missing" for error in errors):
+                    raise NoteError(f"{location}: invalid value for {key}") from None
             if (
                 key in {"model", "reasoning_effort"}
                 and isinstance(value, str)
@@ -126,7 +134,7 @@ def _validate_overrides(values: Any, label: str) -> None:
             valid = type(value) is bool
         else:
             raise NoteError(
-                f"{label}: unknown key {key}; configure connection details in GenAI Bridge"
+                f"{label}: unknown key {key}; define other connection settings in genai_profiles"
             )
         if not valid:
             raise NoteError(f"{label}: invalid value for {key}")
@@ -187,6 +195,8 @@ def _validate(raw: Any, label: str, defaults: dict[str, Any]) -> dict[str, Any]:
             raise NoteError(f"{label}: {group} must be a mapping")
         for key, value in values.items():
             name = f"{group}.{key}"
+            if name == "generation.bridge_profile":
+                raise NoteError(f"{label}: generation.{RENAMED_BRIDGE_PROFILE}")
             if key not in defaults[group]:
                 raise NoteError(f"{label}: unknown key {name}")
             if name == "generation.default_generator":
@@ -201,6 +211,8 @@ def _validate(raw: Any, label: str, defaults: dict[str, Any]) -> dict[str, Any]:
                     if not isinstance(spec, dict):
                         raise NoteError(f"{location}: expected a mapping")
                     for field, setting in spec.items():
+                        if field == "bridge_profile":
+                            raise NoteError(f"{location}.{RENAMED_BRIDGE_PROFILE}")
                         if field not in GENERATOR_DEFAULTS:
                             raise NoteError(f"{location}: unknown key {field}")
                         if field == "overrides":
