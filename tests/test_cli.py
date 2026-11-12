@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from unittest.mock import Mock
@@ -14,12 +15,15 @@ from powerpoint_note.output import result_lines
 
 
 def run_cli(*args, cwd):
+    # Keep user-level app and Bridge configuration files out of subprocess tests.
+    home = str(cwd / ".test-home")
     return subprocess.run(
         [sys.executable, "-m", "powerpoint_note", *map(str, args)],
         cwd=cwd,
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env={**os.environ, "USERPROFILE": home, "HOME": home},
     )
 
 
@@ -49,7 +53,7 @@ def test_cli_config_list_readonly_and_error(tmp_path):
     listing = run_cli("config", "list", cwd=tmp_path)
     assert listing.returncode == 0, listing.stderr
     assert listing.stderr == "[INFO] Showing resolved configuration\n"
-    assert "effective_schema_version=2.1.0" in listing.stdout.splitlines()
+    assert "effective_schema_version=3.0.0" in listing.stdout.splitlines()
     assert "status=success" in listing.stdout.splitlines()
     assert "config.selection.sections=[]" in listing.stdout.splitlines()
     assert any(
@@ -59,7 +63,7 @@ def test_cli_config_list_readonly_and_error(tmp_path):
     machine = run_cli("config", "list", "--json", cwd=tmp_path)
     assert machine.returncode == 0
     assert machine.stderr == "[INFO] Showing resolved configuration\n"
-    assert json.loads(machine.stdout)["effective_schema_version"] == "2.1.0"
+    assert json.loads(machine.stdout)["effective_schema_version"] == "3.0.0"
     quiet = run_cli("config", "list", "--quiet", cwd=tmp_path)
     assert quiet.returncode == 0 and quiet.stderr == ""
     bad = run_cli("export", "missing.pptx", cwd=tmp_path)
@@ -191,3 +195,5 @@ def test_cli_profile_selection_and_removed_language_option(deck_path, tmp_path):
     assert "Extracted content" in output.read_text("utf-8")
     bad = run_cli("export", deck_path, "--language", "en", cwd=tmp_path)
     assert bad.returncode == 2
+    removed = run_cli("export", deck_path, "--bridge-profile", "codex-default", cwd=tmp_path)
+    assert removed.returncode == 2 and "--bridge-profile" in removed.stderr

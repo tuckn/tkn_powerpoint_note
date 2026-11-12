@@ -2452,6 +2452,7 @@ source = { editable = "." }
 dependencies = [
     { name = "defusedxml" },
     { name = "jsonschema" },
+    { name = "pydantic" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "pyyaml" },
     { name = "tkn-genai-bridge" },
@@ -2471,6 +2472,7 @@ dev = [
 requires-dist = [
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=308" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "tkn-genai-bridge", url = "https://github.com/tuckn/tkn_genai_bridge/archive/27ac8e48c8038ee86e029f5b845cd41f6da121af.zip" },

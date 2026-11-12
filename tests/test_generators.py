@@ -15,13 +15,14 @@ from powerpoint_note.models import NoteError
 
 
 def settings(path: Path, generation: dict) -> Path:
-    return save(path, yaml.safe_dump({"schema_version": "2.1.0", "generation": generation}))
+    return save(path, yaml.safe_dump({"schema_version": "3.0.0", "generation": generation}))
 
 
 def test_example_and_no_config_defaults(tmp_path):
     config, details = resolve(home=tmp_path / "home", cwd=tmp_path / "cwd")
-    assert config["generation"]["bridge_profile"] == "codex-default"
+    assert config["generation"]["genai_profile"] == "codex-default"
     assert config["generation"]["prompt_profile"] == "default-ja"
+    assert config["genai_profiles"]["codex-default"] == {"provider": "codex", "model": None}
     assert details["selected_generator"] is None
     path = save(tmp_path / "example.yaml", example())
     config, details = resolve(path, home=tmp_path / "home", cwd=tmp_path / "cwd")
@@ -39,7 +40,7 @@ def test_layered_generator_fields_and_individual_cli_precedence(tmp_path):
             "prompt_profile": "default-en",
             "generators": {
                 "general": {
-                    "bridge_profile": "user-bridge",
+                    "genai_profile": "user-connection",
                     "prompt_profile": "default-ja",
                     "overrides": {"timeout_seconds": 300},
                 }
@@ -69,13 +70,13 @@ def test_layered_generator_fields_and_individual_cli_precedence(tmp_path):
     config, details = resolve(
         explicit,
         {
-            "generation": {"prompt_profile": "default-en", "bridge_profile": "cli-bridge"},
+            "generation": {"prompt_profile": "default-en", "genai_profile": "cli-connection"},
         },
         home=home,
         cwd=cwd,
     )
     assert config["generation"]["prompt_profile"] == "default-en"
-    assert config["generation"]["bridge_profile"] == "cli-bridge"
+    assert config["generation"]["genai_profile"] == "cli-connection"
     assert details["winning_sources"]["generation.prompt_profile"] == "CLI"
     assert details["selected_generator"] == "general"
 
@@ -85,7 +86,7 @@ def test_partial_generator_inherits_shared_settings_and_cli_selects(tmp_path):
         tmp_path / "settings.yaml",
         {
             "default_generator": "japanese",
-            "bridge_profile": "shared-bridge",
+            "genai_profile": "shared-connection",
             "generators": {
                 "japanese": {"prompt_profile": "default-ja"},
                 "english": {"prompt_profile": "default-en"},
@@ -93,7 +94,7 @@ def test_partial_generator_inherits_shared_settings_and_cli_selects(tmp_path):
         },
     )
     config, details = resolve(path, generator="english", home=tmp_path / "home", cwd=tmp_path)
-    assert config["generation"]["bridge_profile"] == "shared-bridge"
+    assert config["generation"]["genai_profile"] == "shared-connection"
     assert config["generation"]["prompt_profile"] == "default-en"
     assert details["selected_generator"] == "english"
     assert details["winning_sources"]["generation.generator_id"] == "CLI"
@@ -113,7 +114,8 @@ def test_partial_generator_inherits_shared_settings_and_cli_selects(tmp_path):
         {"generators": {5: {}}},
         {"generators": {"unused": []}},
         {"generators": {"unused": {"typo": 1}}},
-        {"generators": {"unused": {"bridge_profile": " "}}},
+        {"generators": {"unused": {"genai_profile": " "}}},
+        {"generators": {"unused": {"bridge_profile": "codex-default"}}},
         {"generators": {"unused": {"prompt_profile": False}}},
         {"generators": {"unused": {"overrides": []}}},
         {"generators": {"unused": {"overrides": {"typo": 1}}}},
@@ -256,3 +258,77 @@ def test_generator_cache_scope_and_provenance(deck_path, tmp_path, monkeypatch):
     output.write_text(tampered, encoding="utf-8")
     with pytest.raises(NoteError, match="generation settings provenance"):
         pipeline.verify(output)
+
+
+def test_genai_profiles_merge_by_name_and_field_with_file_relative_paths(tmp_path):
+    home, cwd = tmp_path / "home", tmp_path / "cwd"
+    user = save(
+        home / ".tkn/powerpoint_note/config.yaml",
+        yaml.safe_dump(
+            {
+                "schema_version": "3.0.0",
+                "genai_profiles": {
+                    "custom": {
+                        "provider": "claude-code",
+                        "model": "base",
+                        "cli": {"executable": "./tools/claude.exe"},
+                    },
+                    "named": {"provider": "github-copilot", "cli": {"executable": "copilot"}},
+                },
+            }
+        ),
+    )
+    explicit = save(
+        tmp_path / "other/config.yaml",
+        yaml.safe_dump(
+            {
+                "schema_version": "3.0.0",
+                "genai_profiles": {"custom": {"model": "override"}},
+                "generation": {"genai_profile": "custom"},
+            }
+        ),
+    )
+    config, details = resolve(explicit, home=home, cwd=cwd)
+    custom = config["genai_profiles"]["custom"]
+    assert custom["provider"] == "claude-code" and custom["model"] == "override"
+    assert custom["cli"]["executable"] == str((user.parent / "tools/claude.exe").resolve())
+    assert config["genai_profiles"]["named"]["cli"]["executable"] == "copilot"
+    assert config["genai_profiles"]["codex-default"]["provider"] == "codex"
+    assert config["generation"]["genai_profile"] == "custom"
+    winners = details["winning_sources"]
+    assert winners["genai_profiles.custom.model"] == str(explicit.resolve())
+    assert winners["genai_profiles.custom.cli.executable"] == str(user.resolve())
+    assert winners["genai_profiles.codex-default.provider"] == "built-in"
+
+
+def test_invalid_genai_profile_layer_is_not_hidden_by_later_values(tmp_path):
+    save(
+        tmp_path / "home/.tkn/powerpoint_note/config.yaml",
+        yaml.safe_dump(
+            {"schema_version": "3.0.0", "genai_profiles": {"custom": {"timeout_seconds": "60"}}}
+        ),
+    )
+    explicit = save(
+        tmp_path / "good.yaml",
+        yaml.safe_dump(
+            {"schema_version": "3.0.0", "genai_profiles": {"custom": {"timeout_seconds": 60}}}
+        ),
+    )
+    with pytest.raises(NoteError, match="timeout_seconds"):
+        resolve(explicit, home=tmp_path / "home", cwd=tmp_path / "cwd")
+
+
+def test_old_bridge_settings_fail_with_migration_steps(tmp_path):
+    path = save(
+        tmp_path / "old.yaml",
+        yaml.safe_dump(
+            {
+                "schema_version": "2.1.0",
+                "generation": {"generators": {"named": {"bridge_profile": "codex-default"}}},
+            }
+        ),
+    )
+    before = path.read_bytes()
+    with pytest.raises(NoteError, match="rename bridge_profile to genai_profile"):
+        resolve(path, home=tmp_path / "home", cwd=tmp_path / "cwd")
+    assert path.read_bytes() == before

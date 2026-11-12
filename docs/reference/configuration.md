@@ -10,13 +10,15 @@ Each file is validated before merging. Omitted keys inherit earlier values.
 Nested mappings merge by property; lists replace earlier lists.
 CLI options may precede or follow the subcommand.
 
-New files use `schema_version: "2.1.0"`.
-This version accepts 2.0.x and 2.1.x, including newer patch versions. Other major/minor versions and missing versions fail. Existing 2.0.x files remain readable.
-Old 1.0.x settings are rejected with migration instructions. Reading configuration never rewrites it.
-To migrate 1.0.x, set `schema_version: "2.1.0"` and replace `generation.language: ja`/`en` with
-`generation.prompt_profile: default-ja`/`default-en`. Replace `--language` with `--prompt-profile`.
+Files use `schema_version: "3.0.0"`.
+This version accepts 3.0.x, including newer patch versions. Other major/minor versions and missing versions fail.
+Old 1.0.x, 2.0.x and 2.1.x settings are rejected with migration instructions. Reading configuration never rewrites it.
+To migrate 2.x, set `schema_version: "3.0.0"`, rename `bridge_profile` to `genai_profile` (shared and named generators),
+define the connections you used in GenAI Bridge under `genai_profiles` with the same names, and replace `--bridge-profile` with `--genai-profile`.
+To migrate 1.0.x, also replace `generation.language: ja`/`en` with
+`generation.prompt_profile: default-ja`/`default-en`, and replace `--language` with `--prompt-profile`.
 Relative input/output/config paths resolve from the current working directory; `~` expands to the user's home.
-Credentials are owned by GenAI Bridge, not this configuration.
+Do not store tokens or passwords in this configuration; CLI providers reuse their existing login, and Azure reads an API key from the environment variable named by `azure.api_key_env`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -30,14 +32,15 @@ Credentials are owned by GenAI Bridge, not this configuration.
 | `extraction.max_uncompressed_mb` | `1024` | Maximum total declared uncompressed ZIP size, in MiB. |
 | `generation.default_generator` | `null` | Named preset used unless CLI `--generator` selects another. The initialized example selects `my-codex-def`. |
 | `generation.generators` | `{}` | Named presets, merged by ID and field across configuration layers. |
-| `generation.overrides` | `{}` | Shared scalar Bridge overrides, inherited by named presets. |
-| `generation.bridge_profile` | `codex-default` | Named connection in GenAI Bridge. CLI: `--bridge-profile`. |
+| `generation.overrides` | `{}` | Shared scalar connection overrides, inherited by named presets. |
+| `generation.genai_profile` | `codex-default` | Connection name in `genai_profiles`. CLI: `--genai-profile`. |
 | `generation.prompt_profile` | `default-ja` | Complete content bundle. Built-ins: `default-ja` and `default-en`. CLI: `--prompt-profile`. |
 | `generation.profile_dirs` | `[]` | Optional parent directories containing complete content bundles; searched in list order before packaged profiles. |
 | `generation.max_slides` | `10` | Maximum selected slides per context export; CLI: `--max-slides`. A selection above it fails before AI. |
 | `generation.max_input_chars` | `120000` | Maximum evidence JSON characters per slide or summary request; excludes image bytes and prompt instructions. Exceeding it fails; no text truncation. |
 | `generation.image_width` | `2400` | PNG width in pixels, 600–8000. Height preserves slide aspect ratio. |
-| `generation.render_timeout_seconds` | `180` | Timeout for the entire selected-slides rendering process. AI timeout comes from Bridge. |
+| `generation.render_timeout_seconds` | `180` | Timeout for the entire selected-slides rendering process. AI timeout comes from the selected connection's `timeout_seconds`. |
+| `genai_profiles.<name>` | four built-in connections | AI connections and models; see [AI connections](#ai-connections). |
 
 `--context` is always an explicit invocation option; a config file cannot turn it on.
 There are no `sources`, sync rules, pull or push settings.
@@ -47,28 +50,64 @@ Unknown keys, blank strings, nonpositive limits and wrong types are errors.
 For example, this is a complete valid configuration file that changes language and the context selection limit, inheriting other defaults:
 
 ```yaml
-schema_version: "2.0.0"
+schema_version: "3.0.0"
 generation:
   prompt_profile: default-en
   max_slides: 5
 ```
 
-## Named generators
+## AI connections
 
-A generator groups `bridge_profile`, `prompt_profile` and optional `overrides`.
-It is a reusable preset, not another AI provider. Connections and credentials stay in GenAI Bridge.
+AI connections live in the top-level `genai_profiles` of this configuration.
+The application validates the selected connection and passes it directly to the GenAI Bridge `Runtime`.
+It never reads `~/.tkn/genai_bridge/config.yaml` or other Bridge configuration files, so installing this CLI is enough.
+The current directory's `.tkn/config.yaml` is read as this application's configuration, as before.
+
+The built-in connections use each CLI's default model and existing login:
 
 ```yaml
-schema_version: "2.1.0"
+genai_profiles:
+  codex-default:
+    provider: codex
+    model: null
+  claude-default:
+    provider: claude-code
+    model: null
+  copilot-default:
+    provider: github-copilot
+    model: null
+  antigravity-default:
+    provider: antigravity
+    model: null
+```
+
+Connections merge by name and field across configuration layers, so a user file can set only `genai_profiles.codex-default.model`.
+Add new names for other providers such as Ollama or Azure OpenAI.
+Fields follow the pinned GenAI Bridge `Profile`: `provider`, `model`, `reasoning_effort`, `timeout_seconds`, `max_output_tokens`, `local_only`, `cli`, `ollama`, `azure` and `pricing`.
+See the [GenAI Bridge configuration reference](https://github.com/tuckn/tkn_genai_bridge/blob/27ac8e48c8038ee86e029f5b845cd41f6da121af/docs/reference/configuration.md) for their meaning.
+Names use letters/digits with optional `.`, `_` and `-`, starting with a letter or digit.
+Each file's fields are validated before merging; when any file defines `genai_profiles`, every merged connection is also validated as a whole.
+Unknown fields, wrong types and invalid provider combinations are errors.
+A relative `cli.executable` path resolves from the folder of the file that sets it; a bare command such as `claude` is found on `PATH`.
+
+`generation.genai_profile` selects a connection. A name missing from `genai_profiles` fails before rendering or AI calls when `--context` is used; it never falls back to a Bridge setting or another connection.
+
+## Named generators
+
+A generator groups `genai_profile`, `prompt_profile` and optional `overrides`.
+It is a reusable preset, not another AI provider. Connections are defined in `genai_profiles`.
+
+```yaml
+schema_version: "3.0.0"
 generation:
   default_generator: my-codex-def
   generators:
     my-codex-def:
-      bridge_profile: codex-default
+      genai_profile: codex-default
       prompt_profile: default-ja
       overrides: {}
     my-codex-en:
-      bridge_profile: codex-default
+      genai_profile: codex-default
       prompt_profile: default-en
       overrides:
         timeout_seconds: 450
@@ -81,18 +120,18 @@ tkn-powerpoint-note config list --generator my-codex-en
 ```
 
 Selection is CLI `--generator` → `generation.default_generator`. `null` uses the shared settings.
-Effective fields resolve in this order: individual CLI `--bridge-profile` / `--prompt-profile` → selected generator → shared generation settings → built-in defaults.
+Effective fields resolve in this order: individual CLI `--genai-profile` / `--prompt-profile` → selected generator → shared generation settings → built-in defaults.
 Omitted preset fields inherit shared settings. Definitions with the same ID deep-merge by field, including `overrides`, across config files. Each fragment is validated before merging, even for unused presets.
 IDs use letters/digits with optional `.`, `_` and `-`, starting with a letter or digit.
 Unknown selections fail before output or AI calls. Only the selected content profile's resources are loaded.
 
 `overrides` accepts `model` and `reasoning_effort` (nonempty strings or `null`), `timeout_seconds` (positive finite number up to 86400), `max_output_tokens` (positive integer or `null`) and `local_only` (boolean).
-Provider-specific combinations are checked by GenAI Bridge when `--context` is used; for example, output-token limits require an API provider.
+Provider-specific combinations are checked against the selected connection when `--context` is used; for example, output-token limits require an API provider.
 These scalar settings can be validated during ordinary extraction without loading GenAI Bridge or calling AI. Context dependencies are included in the standard installation.
 Rendering/selection limits and `profile_dirs` remain shared `generation` settings.
 
 Generator selection also controls the template language during ordinary extraction; AI remains opt-in with `--context`.
-Flat `generation.bridge_profile` / `prompt_profile` settings remain supported and do not require named presets. Configuration reads never migrate or overwrite user files.
+Flat `generation.genai_profile` / `prompt_profile` settings remain supported and do not require named presets. Configuration reads never migrate or overwrite user files.
 `config list` reports the definitions, selected ID, effective values and per-field winning sources.
 The selected ID appears as `generationGenerator` in note Frontmatter and `generation_generator` in evidence, results and AI usage.
 Context cache keys use resolved settings and the selected ID. Editing an unused preset does not invalidate a note; changing selected settings can regenerate AI explanations. Reviewed/edited notes keep their normal protection.
@@ -122,7 +161,7 @@ CLI diagnostics, JSON keys and machine evidence retain their stable technical na
 For an additional curated bundle, copy an entire built-in directory under an explicitly configured parent directory:
 
 ```yaml
-schema_version: "2.0.0"
+schema_version: "3.0.0"
 generation:
   prompt_profile: team-ja
   profile_dirs:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 import time
@@ -12,6 +11,7 @@ from typing import Any
 
 import jsonschema
 
+from .config import bridge, connection, default_genai_profiles
 from .context_profiles import ContextProfile, load_profile
 from .io import atomic_write, digest, fingerprint, json_text
 from .models import NoteError
@@ -87,20 +87,23 @@ def generation_properties(folder: Path, files: dict[str, Any]) -> dict[str, Any]
 
 
 class Generator:
-    def __init__(self, settings: dict[str, Any], *, content_profile: ContextProfile | None = None):
+    def __init__(
+        self,
+        settings: dict[str, Any],
+        *,
+        genai_profiles: dict[str, Any] | None = None,
+        content_profile: ContextProfile | None = None,
+    ):
         self.settings = settings
         self.content_profile = content_profile or load_profile(settings)
+        self.bridge = bridge()
+        if genai_profiles is None:
+            genai_profiles = default_genai_profiles()
+        # Connections come only from this application's configuration, never Bridge files.
+        self.profile_name = settings["genai_profile"]
+        self.profile = connection(genai_profiles, self.profile_name, settings.get("overrides", {}))
         try:
-            self.bridge = importlib.import_module("tkn_genai_bridge")
-        except ImportError as exc:
-            raise NoteError(
-                "GenAI Bridge could not be imported; reinstall with uv tool install . --reinstall"
-            ) from exc
-        try:
-            self.profile = self.bridge.load_profile(
-                settings["bridge_profile"], overrides=settings.get("overrides", {})
-            )
-            with self.bridge.Runtime(self.profile) as runtime:
+            with self.bridge.Runtime(self.profile, profile_name=self.profile_name) as runtime:
                 plan = runtime.plan(
                     self.bridge.GenerationRequest(
                         prompt=self.content_profile.prompts["slide"],
@@ -124,7 +127,8 @@ class Generator:
             self.plan["reasoning_effort"] = plan.model_dump(mode="json").get("reasoning_effort")
         except self.bridge.GenAIError as exc:
             raise NoteError(
-                f"GenAI Bridge configuration failed ({exc.code}); check the bridge profile"
+                f"GenAI Bridge configuration failed ({exc.code}); "
+                f"check genai_profiles.{self.profile_name}"
             ) from exc
 
     def generate(
@@ -164,7 +168,7 @@ class Generator:
         atomic_write(journal_path, json_text(journal))
         started = time.monotonic()
         try:
-            with self.bridge.Runtime(self.profile) as runtime:
+            with self.bridge.Runtime(self.profile, profile_name=self.profile_name) as runtime:
                 result = runtime.generate(request)
             data: dict[str, Any] = result.data
             jsonschema.Draft202012Validator(schema).validate(data)

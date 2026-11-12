@@ -132,7 +132,8 @@ def make_parser() -> argparse.ArgumentParser:
         "--generator", help="Named generation settings; overrides generation.default_generator."
     )
     create.add_argument(
-        "--bridge-profile", help="GenAI Bridge connection profile (default: codex-default)."
+        "--genai-profile",
+        help="Connection name in genai_profiles (default: codex-default).",
     )
     create.add_argument(
         "--prompt-profile",
@@ -174,7 +175,7 @@ def overrides(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
         "off_slide": ("selection", "off_slide"),
         "notes": ("extraction", "include_notes"),
         "comments": ("extraction", "include_comments"),
-        "bridge_profile": ("generation", "bridge_profile"),
+        "genai_profile": ("generation", "genai_profile"),
         "prompt_profile": ("generation", "prompt_profile"),
         "max_slides": ("generation", "max_slides"),
     }

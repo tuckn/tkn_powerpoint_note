@@ -1,4 +1,4 @@
-schema_version: "2.1.0"
+schema_version: "3.0.0"
 
 # No source catalog or pull/push synchronization.
 selection:
@@ -13,20 +13,35 @@ extraction:
   max_file_mb: 100
   max_uncompressed_mb: 1024
 
+# Generative AI connections live in this file. No GenAI Bridge config file is read.
+# CLI providers reuse their existing login; tokens and passwords do not belong here.
+genai_profiles:
+  codex-default:
+    provider: codex
+    model: null # null: use the provider CLI's default model.
+  claude-default:
+    provider: claude-code
+    model: null
+  copilot-default:
+    provider: github-copilot
+    model: null
+  antigravity-default:
+    provider: antigravity
+    model: null
+
 generation:
-  # CLI --generator > this default; null uses the shared/legacy settings.
+  # CLI --generator > this default; null uses the shared generation settings.
   default_generator: my-codex-def
   generators:
     my-codex-def:
-      bridge_profile: codex-default
+      genai_profile: codex-default # selects a connection from genai_profiles above
       prompt_profile: default-ja # templates own the language and structure
       overrides: {} # model, reasoning_effort, timeout_seconds, max_output_tokens, local_only
     my-codex-en:
-      bridge_profile: codex-default
+      genai_profile: codex-default
       prompt_profile: default-en
 
-  # Connections, authentication and provider-specific settings belong in GenAI Bridge.
-  # --bridge-profile / --prompt-profile override the selected generator for one invocation.
+  # --genai-profile / --prompt-profile override the selected generator for one invocation.
   # Ordinary extraction uses the prompt profile without calling AI; AI requires --context.
   profile_dirs: [] # ordered parent directories containing complete profile bundles
   max_slides: 10 # safety limit per context export; never silently truncate

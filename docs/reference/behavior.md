@@ -158,7 +158,7 @@ receive an H1 before the generated block. Existing text outside the markers, inc
 ## Dry-run, output and errors
 
 `export --dry-run` reads the input/config/current note, resolves selection and checks protection.
-For context, it additionally checks Bridge settings/executable and evidence limits. Office availability and linked resources are checked when fresh rendering is required; verified context reuse does not require PowerPoint.
+For context, it additionally checks the selected `genai_profiles` connection/executable and evidence limits. Office availability and linked resources are checked when fresh rendering is required; verified context reuse does not require PowerPoint.
 It does not open Office, authenticate, call a provider, make network requests, or write data/cache/report/state files.
 It reports planned counts and `planned_ai_calls`; actual `ai_calls` remains 0.
 Summary size is checked after slide analyses exist during a real export; that future size cannot be validated in advance.

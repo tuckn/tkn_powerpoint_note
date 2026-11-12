@@ -92,3 +92,23 @@ def deck_path(tmp_path: Path) -> Path:
 @pytest.fixture
 def config(tmp_path: Path) -> dict:
     return resolve(home=tmp_path / "home", cwd=tmp_path / "cwd")[0]
+
+
+@pytest.fixture(autouse=True)
+def never_read_bridge_config(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tkn_genai_bridge
+    import tkn_genai_bridge.config as bridge_config
+
+    broken = tmp_path_factory.mktemp("bridge-home") / "broken-bridge.yaml"
+    broken.write_text("broken: [", encoding="utf-8")
+    monkeypatch.setattr(bridge_config, "user_config_path", lambda: broken)
+
+    def bridge_config_read(*args: object, **kwargs: object) -> None:
+        raise AssertionError("GenAI Bridge configuration files must never be read")
+
+    # Connections come only from this application's genai_profiles.
+    for module in (bridge_config, tkn_genai_bridge):
+        monkeypatch.setattr(module, "load_config", bridge_config_read)
+        monkeypatch.setattr(module, "load_profile", bridge_config_read)

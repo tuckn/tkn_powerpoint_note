@@ -24,9 +24,11 @@ tkn-powerpoint-note --version
 GenAI Bridge と、Windows 用の画像化に必要な Python 依存関係は、`uv tool install .` でまとめてインストールされます。
 視覚的な context を生成する場合は、Windows とデスクトップ版 Microsoft PowerPoint を用意します。
 
-画像を扱える [GenAI Bridge](https://github.com/tuckn/tkn_genai_bridge) の接続設定と認証も必要です。
-接続先・モデルは `~/.tkn/genai_bridge/config.yaml` に設定します。
-この CLI の `generation.generators.<id>.bridge_profile` はその接続設定を選びます。
+AI の呼び出しは、画像を扱える [GenAI Bridge](https://github.com/tuckn/tkn_genai_bridge) を通して行います。
+接続先・モデルは、この CLI の設定ファイルの `genai_profiles` で管理します。
+Bridge の設定ファイル `~/.tkn/genai_bridge/config.yaml` は読まないため、この CLI のインストールだけで動作します。
+既定の接続先は認証済みの Codex CLI（`codex-default`）です。
+`generation.generators.<id>.genai_profile` は `genai_profiles` の接続先を選びます。
 `prompt_profile` は、言語・プロンプト・出力構造をまとめたプロファイルを選びます。
 
 ## 最初のノートを作る
@@ -140,21 +142,31 @@ Windows パスは `\` を重ねず表示します。JSON が必要な場合は `
 優先順位は、組み込み既定値 → ユーザー設定 → `./.tkn/config.yaml` → `--config FILE` → 個別 CLI オプションです。
 相対パスは実行時の作業フォルダを基準にします。
 
-新しい設定ファイルには `schema_version: "2.1.0"` を指定します。従来の `2.0.x` と共通の `generation.bridge_profile`／`prompt_profile` も使えます。
+設定ファイルには `schema_version: "3.0.0"` を指定します。共通の `generation.genai_profile`／`prompt_profile` も使えます。
 ノートの言語はプロファイルで選びます。組み込みは `default-ja`（既定・日本語）と `default-en`（英語）の2種類です。
+接続先は `genai_profiles` に名前を付けて定義します。組み込みは `codex-default`・`claude-default`・`copilot-default`・`antigravity-default` です。
+CLI の接続先は既存のログイン状態を使うため、トークンやパスワードは設定ファイルに書きません。
 
 ```yaml
-schema_version: "2.1.0"
+schema_version: "3.0.0"
+
+genai_profiles:
+  codex-default:
+    provider: codex
+    model: null
+  claude-default:
+    provider: claude-code
+    model: null
 
 generation:
   default_generator: my-codex-def
   generators:
     my-codex-def:
-      bridge_profile: codex-default
+      genai_profile: codex-default
       prompt_profile: default-ja
       overrides: {}
     my-codex-en:
-      bridge_profile: codex-default
+      genai_profile: claude-default
       prompt_profile: default-en
 ```
 
@@ -165,14 +177,17 @@ tkn-powerpoint-note export "C:\path\to\deck.pptx" --generator my-codex-en --cont
 tkn-powerpoint-note config list --generator my-codex-en
 ```
 
-個別の `--bridge-profile`／`--prompt-profile` は選択したgeneratorより優先します。
+個別の `--genai-profile`／`--prompt-profile` は選択したgeneratorより優先します。
+`genai_profiles` にない接続先は `--context` の実行前にエラーとなり、別の接続先へ切り替えません。
 `overrides` にはモデル・推論強度・タイムアウトなどを指定できます。
 スライド数や画像幅の設定は、引き続き `generation.max_slides`／`image_width` に置きます。
 通常の抽出でもプロファイルの表示文言とテンプレートを使います。原文の翻訳は行いません。
 
-旧 `1.0.x` 設定を使っている場合は `schema_version` を `"2.1.0"` に変更し、
-`generation.language: ja`／`en` を `generation.prompt_profile: default-ja`／`default-en` に置き換えてください。
-旧 `--language` も `--prompt-profile` に置き換わります。設定ファイルの自動書き換えは行いません。
+旧 `2.0.x`／`2.1.x` 設定を使っている場合は `schema_version` を `"3.0.0"` に変更し、
+`bridge_profile` を `genai_profile` に改名してください。Bridge の設定で使っていた接続先は、同じ名前で `genai_profiles` に定義します。
+旧 `--bridge-profile` は `--genai-profile` に置き換わります。
+旧 `1.0.x` 設定の場合は、さらに `generation.language: ja`／`en` を `generation.prompt_profile: default-ja`／`default-en` に置き換え、旧 `--language` を `--prompt-profile` に置き換えてください。
+設定ファイルの自動書き換えは行いません。
 不正な版、未知のキー、型の誤りは処理前にエラーにします。
 既定値と変更の影響は [設定リファレンス](docs/reference/configuration.md) にまとめています。
 

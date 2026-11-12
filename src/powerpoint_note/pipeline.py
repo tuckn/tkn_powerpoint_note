@@ -212,6 +212,15 @@ def _evidence(deck: Deck, slides: list[Slide], config: dict[str, Any]) -> dict[s
     }
 
 
+def _keyed_generation(generation: dict[str, Any], omitted: set[str]) -> dict[str, Any]:
+    """Hash the connection name under its 2.x key so earlier analyses stay reusable."""
+    return {
+        ("bridge_profile" if key == "genai_profile" else key): value
+        for key, value in generation.items()
+        if key not in omitted
+    }
+
+
 def _context_key(
     evidence: dict[str, Any], config: dict[str, Any], profile: ContextProfile, plan: dict[str, Any]
 ) -> str:
@@ -225,19 +234,17 @@ def _context_key(
                 for key, value in evidence.items()
                 if key not in {"source_sha256", "source_size", "metadata"}
             },
-            "generation": {
-                key: value
-                for key, value in config["generation"].items()
-                if key
-                not in {
+            "generation": _keyed_generation(
+                config["generation"],
+                {
                     "generators",
                     "default_generator",
                     "profile_dirs",
                     "max_slides",
                     "max_input_chars",
                     "render_timeout_seconds",
-                }
-            },
+                },
+            ),
             "profile": {
                 "name": profile.name,
                 "language": profile.language,
@@ -344,15 +351,13 @@ def build(
                 raise NoteError(
                     f"Slide {slide['number']} exceeds generation.max_input_chars; no AI was called"
                 )
-        generator = Generator(config["generation"], content_profile=profile)
+        generator = Generator(
+            config["generation"], genai_profiles=config["genai_profiles"], content_profile=profile
+        )
     build_inputs = {
         "source": deck.source_sha256,
         "evidence": evidence,
-        "generation": {
-            key: value
-            for key, value in config["generation"].items()
-            if key not in {"generators", "default_generator"}
-        }
+        "generation": _keyed_generation(config["generation"], {"generators", "default_generator"})
         if context
         else {
             "prompt_profile": profile.name,

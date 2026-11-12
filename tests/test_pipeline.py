@@ -101,7 +101,7 @@ def test_source_and_evidence_tamper_detected(deck_path, config, tmp_path):
 class FakeGenerator:
     calls = []
 
-    def __init__(self, settings, *, content_profile=None):
+    def __init__(self, settings, *, genai_profiles=None, content_profile=None):
         self.plan = {"provider": "test", "model": "fake", "generation_settings_sha256": "test"}
 
     def generate(self, stage, evidence, image, folder, name):

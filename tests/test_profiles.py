@@ -62,7 +62,7 @@ def test_custom_profile_layer_resolution_and_no_partial_fallback(tmp_path):
     profile_dir = copy_profile(cwd / "profiles")
     config_path = tmp_path / "settings.yaml"
     config_path.write_text(
-        'schema_version: "2.0.0"\ngeneration:\n  profile_dirs: [profiles]\n', encoding="utf-8"
+        'schema_version: "3.0.0"\ngeneration:\n  profile_dirs: [profiles]\n', encoding="utf-8"
     )
     config, details = resolve(config_path, home=tmp_path / "home", cwd=cwd)
     assert config["generation"]["profile_dirs"] == [str((cwd / "profiles").resolve())]

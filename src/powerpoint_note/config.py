@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import importlib
 import math
 import re
 from importlib.resources import files
@@ -15,9 +16,9 @@ from .context_profiles import load_profile
 from .io import atomic_write
 from .models import NoteError
 
-SCHEMA_VERSION = "2.1.0"
+SCHEMA_VERSION = "3.0.0"
 GENERATOR_DEFAULTS: dict[str, Any] = {
-    "bridge_profile": "codex-default",
+    "genai_profile": "codex-default",
     "prompt_profile": "default-ja",
     "overrides": {},
 }
@@ -29,6 +30,78 @@ def example() -> str:
 
 def user_config() -> Path:
     return Path.home() / ".tkn" / "powerpoint_note" / "config.yaml"
+
+
+def default_genai_profiles() -> dict[str, Any]:
+    """Built-in connections, as written by config init."""
+    profiles: dict[str, Any] = yaml.safe_load(example())["genai_profiles"]
+    return profiles
+
+
+def bridge() -> Any:
+    """Import GenAI Bridge only when connection settings or AI calls need it."""
+    try:
+        return importlib.import_module("tkn_genai_bridge")
+    except ImportError as exc:
+        raise NoteError(
+            "GenAI Bridge could not be imported; reinstall with uv tool install . --reinstall"
+        ) from exc
+
+
+def _validate_genai_profiles(values: Any, label: str) -> None:
+    """Check each supplied connection field before merging; partial layers are allowed."""
+    if not isinstance(values, dict):
+        raise NoteError(f"{label}: genai_profiles must be a mapping")
+    from pydantic import TypeAdapter, ValidationError
+
+    fields = bridge().Profile.model_fields
+    for identifier, spec in values.items():
+        _name(identifier, f"{label}: genai_profiles key")
+        location = f"{label}: genai_profiles.{identifier}"
+        if not isinstance(spec, dict):
+            raise NoteError(f"{location}: expected a mapping")
+        for key, value in spec.items():
+            if key not in fields:
+                raise NoteError(f"{location}: unknown key {key}")
+            try:
+                TypeAdapter(fields[key].rebuild_annotation()).validate_python(value, strict=True)
+            except ValidationError:
+                # Pydantic messages can include values; report the field only.
+                raise NoteError(f"{location}: invalid value for {key}") from None
+            if (
+                key in {"model", "reasoning_effort"}
+                and isinstance(value, str)
+                and (not value.strip() or "\x00" in value)
+            ):
+                raise NoteError(f"{location}: {key} must not be empty or contain NUL")
+
+
+def _resolve_genai_paths(data: dict[str, Any], base: Path) -> None:
+    """Resolve executable paths from the file that wrote them; bare names use PATH."""
+    for spec in data.get("genai_profiles", {}).values():
+        cli = spec.get("cli")
+        executable = cli.get("executable") if isinstance(cli, dict) else None
+        if isinstance(executable, str) and (
+            "/" in executable or "\\" in executable or executable.startswith("~")
+        ):
+            cli["executable"] = str((base / Path(executable).expanduser()).resolve())
+
+
+def connection(
+    genai_profiles: dict[str, Any], name: str, overrides: dict[str, Any] | None = None
+) -> Any:
+    """Validated Bridge Profile from this application's genai_profiles only."""
+    if name not in genai_profiles:
+        raise NoteError(f"GenAI profile is not defined in genai_profiles: {name}")
+    from pydantic import ValidationError
+
+    try:
+        return bridge().Profile.model_validate({**genai_profiles[name], **(overrides or {})})
+    except ValidationError as exc:
+        reasons = "; ".join(
+            error["msg"] for error in exc.errors(include_input=False, include_url=False)
+        )
+        raise NoteError(f"genai_profiles.{name}: invalid connection settings: {reasons}") from None
 
 
 def _name(value: Any, label: str) -> None:
@@ -91,13 +164,22 @@ def _validate(raw: Any, label: str, defaults: dict[str, Any]) -> dict[str, Any]:
         )
     if version.startswith("1.0."):
         raise NoteError(
-            f"{label}: config 1.0.x was replaced by 2.x; set schema_version: '{SCHEMA_VERSION}' "
-            "and replace generation.language ja/en with generation.prompt_profile default-ja/default-en"
+            f"{label}: config 1.0.x was replaced; set schema_version: '{SCHEMA_VERSION}', "
+            "replace generation.language ja/en with generation.prompt_profile default-ja/default-en "
+            "and rename bridge_profile to genai_profile"
         )
-    if tuple(map(int, version.split(".")))[:2] not in {(2, 0), (2, 1)}:
-        raise NoteError(f"{label}: unsupported schema {version}; supported: 2.0.x and 2.1.x")
+    if tuple(map(int, version.split(".")))[:2] in {(2, 0), (2, 1)}:
+        raise NoteError(
+            f"{label}: config {version} was replaced; set schema_version: '{SCHEMA_VERSION}', "
+            "define connections in genai_profiles and rename bridge_profile to genai_profile"
+        )
+    if tuple(map(int, version.split(".")))[:2] != (3, 0):
+        raise NoteError(f"{label}: unsupported schema {version}; supported: 3.0.x")
     for group, values in raw.items():
         if group == "schema_version":
+            continue
+        if group == "genai_profiles":
+            _validate_genai_profiles(values, label)
             continue
         if group not in defaults:
             raise NoteError(f"{label}: unknown key {group}")
@@ -172,6 +254,7 @@ def resolve(
         if not explicit.is_file():
             raise NoteError(f"Explicit config does not exist: {explicit}")
         candidates.append(explicit)
+    custom_connections = False
     for path in candidates:
         if not path.exists():
             continue
@@ -180,6 +263,9 @@ def resolve(
             data = _validate(raw, str(path), defaults)
         except (OSError, yaml.YAMLError) as exc:
             raise NoteError(f"Cannot read config: {path} ({type(exc).__name__})") from exc
+        if "genai_profiles" in data:
+            custom_connections = True
+            _resolve_genai_paths(data, path.parent)
         source = str(path.resolve())
         loaded.append({"path": source, "schema_version": data["schema_version"], "migrated": False})
         fragment = {key: value for key, value in data.items() if key != "schema_version"}
@@ -204,6 +290,10 @@ def resolve(
         _validate({"schema_version": SCHEMA_VERSION, **overrides}, "CLI options", defaults)
         _merge(effective, overrides)
         origins.update(dict.fromkeys(_paths(overrides), "CLI"))
+    if custom_connections:
+        # Built-ins are known valid; configured connections also need cross-field checks.
+        for name in effective["genai_profiles"]:
+            connection(effective["genai_profiles"], name)
     generation["generator_id"] = selected
     origins["generation.generator_id"] = (
         "CLI" if generator is not None else origins["generation.default_generator"]
