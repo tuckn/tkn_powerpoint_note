@@ -1,9 +1,6 @@
 {
   "type": "object",
   "properties": {
-    "slide_number": {
-      "type": "integer"
-    },
     "summary": {
       "type": "string",
       "minLength": 1
@@ -37,7 +34,6 @@
     }
   },
   "required": [
-    "slide_number",
     "summary",
     "sections",
     "uncertainties"

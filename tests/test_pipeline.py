@@ -2,479 +2,317 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import pytest
-import yaml
-from conftest import write_deck
+from conftest import make_deck, write_deck
 
 from powerpoint_note import pipeline
 from powerpoint_note.io import file_digest
-from powerpoint_note.markdown import split_note
-from powerpoint_note.models import NoteError
+from powerpoint_note.markdown import BEGIN, read_frontmatter, split_note
+from powerpoint_note.pipeline import Options, export, pull, summarize
+from powerpoint_note.store import assets_dir, load_state
+
+SLIDES = [(256, "One", "first body"), (257, "Two", "second body"), (258, "Three", "third body")]
+BIG = {"generation": {"limits": {"max_slides": 100}}}
 
 
-def test_build_verify_repeat_and_read_only(deck_path, config, tmp_path):
-    output = tmp_path / "note.md"
-    original = file_digest(deck_path)
-    result = pipeline.build(deck_path, output, config)
-    assert result["status"] == "created"
-    text = output.read_text("utf-8")
-    assert "A &amp; B" in text
-    assert "Speaker evidence" in text and "Review comment" in text
-    assert "Private off-canvas" not in text and "Hidden" not in text
-    assert pipeline.verify(output)["status"] == "verified"
-    files = {str(p): p.stat().st_mtime_ns for p in tmp_path.rglob("*") if p.is_file()}
-    assert pipeline.build(deck_path, output, config)["status"] == "unchanged"
-    assert files == {str(p): p.stat().st_mtime_ns for p in tmp_path.rglob("*") if p.is_file()}
-    assert file_digest(deck_path) == original
+def run(source, **options):
+    overrides = options.pop("overrides", None)
+    file = options.pop("file", None)
+    return pull("demo", source["load"](overrides), Options(**options), file)
 
 
-def test_dry_run_creates_nothing(deck_path, config, tmp_path):
-    output = tmp_path / "not-created" / "note.md"
-    before = set(tmp_path.rglob("*"))
-    result = pipeline.build(deck_path, output, config, dry_run=True)
-    assert result["dry_run"] and result["ai_calls"] == 0
-    assert set(tmp_path.rglob("*")) == before
+def one(source, **options):
+    rows = run(source, **options)
+    assert len(rows) == 1, rows
+    return rows[0]
 
 
-def test_outside_append_and_handwriting_preserved(deck_path, config, tmp_path):
-    output = tmp_path / "note.md"
-    pipeline.build(deck_path, output, config)
-    text = output.read_text("utf-8").replace("schemaVersion:", "custom: keep\nschemaVersion:")
-    text += "\nMy handwritten note.\n"
-    output.write_text(text, encoding="utf-8")
-    config["selection"]["off_slide"] = "append"
-    assert pipeline.build(deck_path, output, config)["status"] == "updated"
-    updated = output.read_text("utf-8")
-    assert "Private off-canvas" in updated
+def note_of(source, name="deck.pptx"):
+    return source["notes"] / (name + ".md")
+
+
+def tree(root: Path) -> dict[str, int]:
+    return {str(p): p.stat().st_mtime_ns for p in root.rglob("*") if p.is_file()}
+
+
+def test_pull_creates_then_leaves_an_unchanged_note_alone(source):
+    deck = write_deck(source["decks"] / "deck.pptx")
+    original = file_digest(deck)
+    row = one(source)
+    assert row["status"] == "created" and row["contextStatus"] == "not-generated"
+    assert row["sourcePath"] == "deck.pptx" and row["sourceRoot"] == "demo"
+    text = note_of(source).read_text("utf-8")
+    metadata, _, body, _ = split_note(text)
+    assert metadata["type"] == "PowerPoint" and metadata["schemaVersion"] == "5.0.0"
+    assert metadata["sourceId"] == "demo:deck.pptx" and metadata["title"] == "Example Deck"
+    assert "## Presentation Map" in body and "| 2 | 100 | Hidden |" in body
+    assert "Visible body" in body and "Speaker evidence" in body and "Review comment" in body
+    assert "Private off-canvas" not in body and "### スライド 2" not in body
+    before = tree(source["notes"])
+    assert one(source)["status"] == "unchanged"
+    assert tree(source["notes"]) == before
+    assert file_digest(deck) == original
+
+
+def test_dry_run_and_status_write_nothing(source):
+    write_deck(source["decks"] / "deck.pptx")
+    assert one(source, dry_run=True)["status"] == "would-create"
+    assert not source["notes"].exists()
+    one(source)
+    before = tree(source["notes"])
+    assert one(source, dry_run=True)["status"] == "unchanged"
+    assert tree(source["notes"]) == before
+
+
+def test_text_outside_markers_and_unknown_properties_survive(source):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source)
+    note = note_of(source)
+    text = note.read_text("utf-8").replace("tags: []", "custom: keep\ntags:\n- mine")
+    note.write_text(text + "\nMy handwritten note.\n", encoding="utf-8")
+    make_deck(source["decks"] / "deck.pptx", [*SLIDES, (259, "Four", "new body")])
+    assert one(source)["status"] == "updated"
+    updated = note.read_text("utf-8")
+    metadata = split_note(updated)[0]
     assert updated.endswith("\nMy handwritten note.\n")
-    assert split_note(updated)[0]["custom"] == "keep"
+    assert metadata["custom"] == "keep" and metadata["tags"] == ["mine"]
+    assert "new body" in updated
 
 
-def test_generated_edits_protected_and_force_backed_up(deck_path, config, tmp_path):
-    output = tmp_path / "note.md"
-    pipeline.build(deck_path, output, config)
-    edited = output.read_text("utf-8").replace("Visible body", "Hand edited")
-    output.write_text(edited, encoding="utf-8")
-    with pytest.raises(NoteError):
-        pipeline.build(deck_path, output, config, dry_run=True)
-    with pytest.raises(NoteError):
-        pipeline.build(deck_path, output, config)
-    assert output.read_text("utf-8") == edited
-    result = pipeline.build(deck_path, output, config, force=True)
-    assert Path(result["backup"]).read_text("utf-8") == edited
-    assert "Visible body" in output.read_text("utf-8")
+def test_hand_edited_generated_part_is_protected_until_forced(source, tmp_path, monkeypatch):
+    monkeypatch.setattr("powerpoint_note.store.state_root", lambda: tmp_path / "state")
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source)
+    note = note_of(source)
+    edited = note.read_text("utf-8").replace("first body", "Hand edited")
+    note.write_text(edited, encoding="utf-8")
+    row = one(source)
+    assert row["status"] == "protected" and note.read_text("utf-8") == edited
+    assert summarize("pull", [row], Options())["errors"] == 1
+    forced = one(source, force=True)
+    assert forced["status"] == "updated"
+    assert Path(forced["backupPath"]).read_text("utf-8") == edited
+    assert "first body" in note.read_text("utf-8")
 
 
-@pytest.mark.parametrize("review_status", ["reviewed", "accepted"])
-def test_reviewed_note_and_foreign_note(deck_path, config, tmp_path, review_status):
-    output = tmp_path / "note.md"
-    pipeline.build(deck_path, output, config)
-    output.write_text(
-        output.read_text("utf-8").replace(
-            "reviewStatus: unreviewed", f"reviewStatus: {review_status}"
-        ),
-        encoding="utf-8",
-    )
-    assert pipeline.build(deck_path, output, config)["status"] == "unchanged"
-    config["selection"]["slides"] = "1"
-    with pytest.raises(NoteError):
-        pipeline.build(deck_path, output, config)
-    other = tmp_path / "foreign.md"
-    other.write_text("# Mine")
-    with pytest.raises(NoteError):
-        pipeline.build(deck_path, other, config, force=True)
+def test_a_note_without_state_is_adopted_when_it_matches(source):
+    """Notes copied to another PC lose `img/`; an untouched note must not look edited."""
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source)
+    (assets_dir(note_of(source)) / "state.json").unlink()
+    assert one(source)["status"] == "unchanged"
+    assert load_state(assets_dir(note_of(source)))["generatedSha256"]
 
 
-def test_source_and_evidence_tamper_detected(deck_path, config, tmp_path):
-    output = tmp_path / "note.md"
-    result = pipeline.build(deck_path, output, config)
-    evidence = Path(result["evidence"]) / "evidence.json"
-    evidence.write_text("{}")
-    with pytest.raises(NoteError):
-        pipeline.verify(output)
-    with pytest.raises(NoteError):
-        pipeline.build(deck_path, output, config)
-
-
-class FakeGenerator:
-    calls = []
-
-    def __init__(self, settings, *, genai_profiles=None, content_profile=None):
-        self.plan = {"provider": "test", "model": "fake", "generation_settings_sha256": "test"}
-
-    def generate(self, stage, evidence, image, folder, name):
-        self.calls.append((stage, evidence))
-        (folder / (name + ".usage.json")).write_text(
-            json.dumps(
-                {
-                    **self.plan,
-                    "status": "success",
-                    "record": {
-                        "provider": "test",
-                        "requested_model": "fake",
-                        "response_model": "actual-fake",
-                        "reasoning_effort": "high",
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-        if stage == "slide":
-            return {
-                "slide_number": evidence["slide"]["number"],
-                "summary": "Explained context",
-                "sections": [],
-                "uncertainties": [],
-            }
-        return {
-            "summary": "Selected presentation context",
-            "key_points": [
-                {
-                    "text": "A supported claim",
-                    "slides": [x["slide_number"] for x in evidence["slides"]],
-                }
-            ],
-            "uncertainties": [],
-        }
-
-
-def fake_render(source, expected_hash, numbers, folder, width, timeout):
-    paths = []
-    for n in numbers:
-        path = folder / f"slide-{n:04d}.png"
-        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"fake")
-        paths.append(path)
-    return paths
-
-
-@pytest.fixture
-def fake_context(monkeypatch):
-    FakeGenerator.calls = []
-    monkeypatch.setattr(pipeline, "Generator", FakeGenerator)
-    monkeypatch.setattr(pipeline, "preflight", lambda: None)
-    monkeypatch.setattr(pipeline, "render", fake_render)
-    return FakeGenerator
-
-
-def test_context_selected_only_summary_cache_and_refresh(deck_path, config, tmp_path, fake_context):
-    config["selection"]["slides"] = "3"
-    output = tmp_path / "context.md"
-    result = pipeline.build(deck_path, output, config, context=True)
-    assert result["ai_calls"] == 2 and len(fake_context.calls) == 2
-    assert fake_context.calls[0][1]["slide"]["number"] == 3
-    assert "Selected presentation context" in output.read_text("utf-8")
-    assert "Speaker evidence" not in output.read_text("utf-8")
-    assert pipeline.build(deck_path, output, config, context=True)["status"] == "unchanged"
-    assert len(fake_context.calls) == 2
-    pipeline.build(deck_path, output, config, context=True, refresh=True)
-    assert len(fake_context.calls) == 4
-    assert pipeline.build(deck_path, output, config, context=True)["status"] == "unchanged"
-
-
-def test_context_frontmatter_coverage_profiles_and_clear(deck_path, config, tmp_path, fake_context):
-    output = tmp_path / "context.md"
-    pipeline.build(deck_path, output, config, context=True)
-    metadata = split_note(output.read_text("utf-8"))[0]
-    assert metadata["contextStatus"] == "partial"
-    assert metadata["contextProfiles"] == ["default-ja"]
-    assert metadata["contextAnalyzedSlides"] == "1,3"
-    assert metadata["contextOmittedSlides"] == "2"
-    evidence = json.loads(
-        (output.parent / metadata["evidencePath"] / "evidence.json").read_text("utf-8")
-    )
-    assert metadata["contextSourceFingerprint"] == evidence["source_fingerprint"]
-    assert len(metadata["contextSourceFingerprint"]) == 64
-    assert metadata["contextGeneratedAt"].endswith("+09:00")
-    config["selection"]["include_hidden"] = True
-    config["generation"]["prompt_profile"] = "default-en"
-    pipeline.build(deck_path, output, config, context=True)
-    metadata = split_note(output.read_text("utf-8"))[0]
-    assert metadata["contextStatus"] == "current"
-    assert metadata["contextProfiles"] == ["default-en"]
-    assert metadata["contextAnalyzedSlides"] == "1-3"
-    assert metadata["contextOmittedSlides"] == ""
-    pipeline.build(deck_path, output, config)
-    metadata = split_note(output.read_text("utf-8"))[0]
-    assert metadata["contextStatus"] == "not-generated"
-    assert metadata["contextProfiles"] == []
-    assert metadata["contextAnalyzedSlides"] == ""
-    assert metadata["contextSourceFingerprint"] == metadata["contextGeneratedAt"] == ""
-
-
-@pytest.mark.parametrize("change", ["version", "template"])
-def test_context_reused_when_only_note_presentation_changes(
-    deck_path, config, tmp_path, fake_context, monkeypatch, change
-):
-    from test_profiles import copy_profile
-
-    profile_dir = copy_profile(tmp_path / "profiles")
-    config["generation"]["profile_dirs"] = [str(profile_dir.parent)]
-    output = tmp_path / "context.md"
-    pipeline.build(deck_path, output, config, context=True)
-    original = split_note(output.read_text("utf-8"))[0]
-    output.write_text(output.read_text("utf-8") + "\nHandwritten.\n", encoding="utf-8")
-    calls = len(fake_context.calls)
-    if change == "version":
-        monkeypatch.setattr(pipeline, "__version__", "99.0.0")
-    else:
-        path = profile_dir / "note-template.md"
-        path.write_text(path.read_text("utf-8") + "\nNew display layout.\n", encoding="utf-8")
-    monkeypatch.setattr(pipeline, "preflight", lambda: pytest.fail("No rendering required"))
-    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
-    plan = pipeline.build(deck_path, output, config, context=True, dry_run=True)
-    assert plan["planned_ai_calls"] == 0 and plan["reused_context"]
-    assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
-    result = pipeline.build(deck_path, output, config, context=True)
-    assert result["ai_calls"] == 0 and result["reused_context"]
-    assert len(fake_context.calls) == calls
-    text = output.read_text("utf-8")
+def test_context_is_generated_once_per_slide_and_reused(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    planned = one(source, context=True, dry_run=True)
+    assert planned["status"] == "would-create" and planned["plannedAiCalls"] == 4
+    assert not source["notes"].exists() and not ai.slide_calls
+    row = one(source, context=True)
+    assert (row["aiCalls"], row["generatedSlides"], row["contextStatus"]) == (4, 3, "current")
+    assert sorted(ai.rendered) == [1, 2, 3]
+    text = note_of(source).read_text("utf-8")
+    assert text.count("Explained") == 3 and "Deck summary" in text
+    assert "Point（スライド 1）" in text and "img/deck.pptx/slides/" in text
     metadata = split_note(text)[0]
-    assert text.endswith("\nHandwritten.\n")
-    assert metadata["buildKey"] != original["buildKey"]
-    for key in ("contextGeneratedAt", "contextSourceFingerprint", "created", "noteId"):
-        assert metadata[key] == original[key]
-    if change == "template":
-        assert "New display layout." in text
-    assert pipeline.verify(output)["status"] == "verified"
-    assert pipeline.build(deck_path, output, config, context=True)["status"] == "unchanged"
-
-
-@pytest.mark.parametrize("legacy_schema", ["1.0.0", "2.0.0"])
-def test_legacy_context_migration_avoids_ai(
-    deck_path, config, tmp_path, fake_context, monkeypatch, legacy_schema
-):
-    schema = pipeline.SCHEMA_VERSION
-    original_fingerprint = pipeline.fingerprint
-
-    def legacy_fingerprint(value):
-        if isinstance(value, dict) and "note_schema_version" in value:
-            value = {
-                **value,
-                "evidence": {
-                    k: v for k, v in value["evidence"].items() if k != "source_fingerprint"
-                },
-            }
-            if legacy_schema == "1.0.0":
-                value.pop("note_schema_version")
-            else:
-                value["note_schema_version"] = "2.0.0"
-        return original_fingerprint(value)
-
-    monkeypatch.setattr(pipeline, "fingerprint", legacy_fingerprint)
-    monkeypatch.setattr(pipeline, "__version__", "0.6.0")
-    output = tmp_path / "context.md"
-    pipeline.build(deck_path, output, config, context=True)
-    text = output.read_text("utf-8")
-    metadata = split_note(text)[0]
-    folder = output.parent / metadata["evidencePath"]
-    manifest_path = folder / "manifest.json"
-    manifest = json.loads(manifest_path.read_text("utf-8"))
-    manifest.pop("context_build_key")
-    manifest.pop("context_generated_at")
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    metadata["schemaVersion"] = legacy_schema
-    metadata["generator"] = "tkn-powerpoint-note"
-    if legacy_schema == "1.0.0":
-        for key in list(metadata):
-            if key.startswith("promptProfile"):
-                metadata.pop(key)
-        metadata["promptProfile"] = manifest["prompt_profile"]
-    for key in list(metadata):
-        if key.startswith("context") and key != "context":
-            metadata.pop(key)
-    metadata.pop("sourceFileName")
-    metadata.pop("sourceFullPath")
-    metadata["sourceMetadata"] = json.loads((folder / "evidence.json").read_text("utf-8"))[
-        "metadata"
+    assert metadata["contextAnalyzedSlides"] == "1-3" and metadata["contextProfiles"] == [
+        "default-ja"
     ]
-    output.write_text(
-        "---\n" + yaml.safe_dump(metadata) + "---\n" + text.split("\n---\n", 1)[1],
-        encoding="utf-8",
+    again = one(source, context=True)
+    assert (again["status"], again["aiCalls"], again["reusedSlides"]) == ("unchanged", 0, 3)
+    assert len(ai.slide_calls) == 3 and ai.deck_calls == 1
+
+
+def test_evidence_sent_to_ai_is_compact_and_has_no_position(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES, numbered=True)
+    one(source, context=True)
+    payload = ai.slide_calls[0].split("SOURCE EVIDENCE (JSON):\n", 1)[1]
+    assert payload == json.dumps(
+        json.loads(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
-    calls = len(fake_context.calls)
-    monkeypatch.setattr(pipeline, "fingerprint", original_fingerprint)
-    monkeypatch.setattr(pipeline, "SCHEMA_VERSION", schema)
-    monkeypatch.setattr(pipeline, "__version__", "99.0.0")
-    monkeypatch.setattr(pipeline, "preflight", lambda: pytest.fail("Migration must not render"))
-    result = pipeline.build(deck_path, output, config, context=True)
-    assert result["ai_calls"] == 0 and len(fake_context.calls) == calls
-    migrated = split_note(output.read_text("utf-8"))[0]
-    assert migrated["schemaVersion"] == schema
-    assert migrated["contextProfiles"] == ["default-ja"]
-    assert migrated["contextGeneratedAt"] == pipeline.timestamp(manifest["created_at"], "date")
-    assert "sourceMetadata" not in migrated
-    assert pipeline.verify(output)["status"] == "verified"
+    data = json.loads(payload)
+    assert "number" not in data and "page_number" not in data
+    assert data["shapes"][0] == {
+        "box": [10, 13, 210, 80],
+        "id": "1",
+        "kind": "sp",
+        "role": "title",
+        "text": ["One"],
+    }
 
 
-def test_schema_3_note_moves_to_proper_noun_type_without_ai(
-    deck_path, config, tmp_path, fake_context, monkeypatch
-):
-    original_fingerprint = pipeline.fingerprint
-
-    def schema_3_key(value):
-        if isinstance(value, dict) and "note_schema_version" in value:
-            value = {**value, "note_schema_version": "3.0.0"}
-        return original_fingerprint(value)
-
-    monkeypatch.setattr(pipeline, "fingerprint", schema_3_key)
-    output = tmp_path / "note.md"
-    pipeline.build(deck_path, output, config, context=True)
-    text = output.read_text("utf-8")
-    old = split_note(text)[0]
-    old.update(type="powerpoint", schemaVersion="3.0.0")
-    output.write_text(
-        "---\n" + yaml.safe_dump(old) + "---\n" + text.split("\n---\n", 1)[1], encoding="utf-8"
+def test_inserting_a_slide_only_explains_the_new_slide(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES, numbered=True)
+    one(source, context=True)
+    make_deck(
+        source["decks"] / "deck.pptx",
+        [SLIDES[0], (300, "New", "inserted"), *SLIDES[1:]],
+        numbered=True,
     )
-    assert pipeline.verify(output)["status"] == "verified"
-    calls = len(fake_context.calls)
-    monkeypatch.setattr(pipeline, "fingerprint", original_fingerprint)
-    monkeypatch.setattr(pipeline, "preflight", lambda: pytest.fail("Migration must not render"))
-    result = pipeline.build(deck_path, output, config, context=True)
-    assert result["ai_calls"] == 0 and len(fake_context.calls) == calls
-    migrated_text = output.read_text("utf-8")
-    migrated = split_note(migrated_text)[0]
-    assert migrated["type"] == "PowerPoint" and migrated["schemaVersion"] == "4.0.0"
-    assert migrated_text.startswith("---\ntype: PowerPoint\n")
-    assert migrated["noteId"] == old["noteId"] and migrated["created"] == old["created"]
-    assert pipeline.verify(output)["status"] == "verified"
+    row = one(source, context=True)
+    assert (row["generatedSlides"], row["reusedSlides"], row["aiCalls"]) == (1, 3, 2)
+    assert ai.rendered[3:] == [2]
+    assert split_note(note_of(source).read_text("utf-8"))[0]["contextAnalyzedSlides"] == "1-4"
 
 
-@pytest.mark.parametrize("change", ["properties", "zip-container"])
-def test_document_properties_and_zip_changes_reuse_context(
-    deck_path, config, tmp_path, fake_context, monkeypatch, change
-):
-    output = tmp_path / "context.md"
-    pipeline.build(deck_path, output, config, context=True)
-    before = split_note(output.read_text("utf-8"))[0]
-    with ZipFile(deck_path) as archive:
-        parts = {name: archive.read(name) for name in archive.namelist()}
-    if change == "properties":
-        parts["docProps/core.xml"] = parts["docProps/core.xml"].replace(
-            b"Example Deck", b"New presentation title"
-        )
-    with ZipFile(
-        deck_path, "w", ZIP_STORED if change == "zip-container" else ZIP_DEFLATED
-    ) as archive:
-        for name, content in reversed(list(parts.items())):
-            archive.writestr(name, content)
-    assert file_digest(deck_path) != before["sourceSha256"]
-    calls = len(fake_context.calls)
-    monkeypatch.setattr(pipeline, "preflight", lambda: pytest.fail("Content is unchanged"))
-    result = pipeline.build(deck_path, output, config, context=True)
-    assert result["ai_calls"] == 0 and result["reused_context"]
-    after = split_note(output.read_text("utf-8"))[0]
-    assert after["sourceSha256"] != before["sourceSha256"]
-    assert after["contextSourceFingerprint"] == before["contextSourceFingerprint"]
-    assert after["contextGeneratedAt"] == before["contextGeneratedAt"]
-    assert len(fake_context.calls) == calls
-    if change == "properties":
-        assert after["title"] == "New presentation title"
-    assert pipeline.verify(output)["status"] == "verified"
+def test_plain_pull_keeps_explanations_and_marks_changed_slides_stale(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source, context=True)
+    make_deck(source["decks"] / "deck.pptx", [SLIDES[0], (257, "Two", "rewritten"), SLIDES[2]])
+    row = one(source)
+    assert (row["status"], row["contextStatus"], row["staleSlides"]) == ("updated", "stale", "2")
+    text = note_of(source).read_text("utf-8")
+    assert text.count("Explained") == 3 and "rewritten" in text and "[!WARNING]" in text
+    assert split_note(text)[0]["contextStaleSlides"] == "2"
+    refreshed = one(source, context=True)
+    assert (refreshed["generatedSlides"], refreshed["contextStatus"]) == (1, "current")
+    assert "[!WARNING]" not in note_of(source).read_text("utf-8")
 
 
-def test_damaged_context_cannot_be_reused(deck_path, config, tmp_path, fake_context, monkeypatch):
-    output = tmp_path / "context.md"
-    pipeline.build(deck_path, output, config, context=True)
-    metadata = split_note(output.read_text("utf-8"))[0]
-    context_file = output.parent / metadata["evidencePath"] / "context.json"
-    context_file.write_text("{}", encoding="utf-8")
-    original_note = output.read_bytes()
-    calls = len(fake_context.calls)
-    monkeypatch.setattr(pipeline, "__version__", "99.0.0")
-    with pytest.raises(NoteError, match="missing or modified"):
-        pipeline.build(deck_path, output, config, context=True)
-    assert output.read_bytes() == original_note
-    assert len(fake_context.calls) == calls
+def test_selected_slides_accumulate_explanations(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    first = one(source, context=True, slides="1")
+    assert (first["generatedSlides"], first["contextStatus"]) == (1, "partial")
+    second = one(source, context=True, slides="3")
+    assert (second["generatedSlides"], second["contextStatus"]) == (1, "partial")
+    metadata = split_note(note_of(source).read_text("utf-8"))[0]
+    assert metadata["contextAnalyzedSlides"] == "1,3" and metadata["contextOmittedSlides"] == "2"
 
 
-@pytest.mark.parametrize("change", ["source", "selection", "profile", "prompt"])
-def test_changed_context_inputs_require_new_ai(deck_path, config, tmp_path, fake_context, change):
-    from test_profiles import copy_profile
-
-    profile_dir = copy_profile(tmp_path / "profiles")
-    config["generation"]["profile_dirs"] = [str(profile_dir.parent)]
-    output = tmp_path / "context.md"
-    pipeline.build(deck_path, output, config, context=True)
-    calls = len(fake_context.calls)
-    if change == "source":
-        write_deck(deck_path, {"ppt/media/new.png": "new image bytes"})
-    elif change == "selection":
-        config["selection"]["slides"] = "3"
-    elif change == "profile":
-        config["generation"]["prompt_profile"] = "default-en"
-    else:
-        path = profile_dir / "prompt.md"
-        path.write_text(path.read_text("utf-8") + "\nNew instruction.\n", encoding="utf-8")
-    result = pipeline.build(deck_path, output, config, context=True)
-    assert result["ai_calls"] > 0 and not result["reused_context"]
-    assert len(fake_context.calls) > calls
+def test_a_failed_run_keeps_the_note_and_resumes_from_finished_slides(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source)
+    before = note_of(source).read_text("utf-8")
+    ai.fail_on = "third body"
+    with pytest.raises(RuntimeError):
+        run(source, context=True)
+    assert note_of(source).read_text("utf-8") == before and len(ai.slide_calls) == 2
+    assert not list(source["notes"].glob(".*.lock"))
+    ai.fail_on = None
+    row = one(source, context=True)
+    assert (row["generatedSlides"], row["reusedSlides"], row["aiCalls"]) == (1, 2, 2)
 
 
-@pytest.mark.parametrize(
-    "field", ["contextProfiles", "contextSourceFingerprint", "contextGeneratedAt"]
-)
-def test_context_provenance_tampering_is_detected(deck_path, config, tmp_path, fake_context, field):
-    output = tmp_path / "context.md"
-    pipeline.build(deck_path, output, config, context=True)
-    text = output.read_text("utf-8")
-    metadata = split_note(text)[0]
-    metadata[field] = ["changed"] if field == "contextProfiles" else "changed"
-    output.write_text(
-        "---\n" + yaml.safe_dump(metadata) + "---\n" + text.split("\n---\n", 1)[1],
-        encoding="utf-8",
+def test_rejected_ai_output_is_reported_and_saved(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES[:1])
+    ai.invalid = True
+    row = one(source, context=True)
+    assert row["status"] == "error" and "does not match the schema" in row["message"]
+    rejected = list(source["notes"].rglob("rejected.json"))
+    assert len(rejected) == 1 and json.loads(rejected[0].read_text("utf-8")) == {"summary": ""}
+    usage = json.loads((rejected[0].parent / "usage.json").read_text("utf-8"))
+    assert usage["status"] == "rejected" and usage["error_message"]
+    assert not note_of(source).exists()
+
+
+def test_a_slide_over_the_input_limit_is_skipped_and_the_rest_continue(source, ai):
+    slides = [SLIDES[0], (257, "Two", "x" * 3000), SLIDES[2]]
+    make_deck(source["decks"] / "deck.pptx", slides)
+    row = one(source, context=True, overrides={"generation": {"limits": {"max_input_chars": 2000}}})
+    assert (row["status"], row["generatedSlides"], row["contextStatus"]) == (
+        "created",
+        2,
+        "partial",
     )
-    with pytest.raises(NoteError, match="context provenance"):
-        pipeline.verify(output)
+    assert row["skippedSlides"][0].startswith("2: evidence needs")
+    text = note_of(source).read_text("utf-8")
+    assert "このスライドの説明は生成していません" in text and text.count("Explained") == 2
 
 
-def test_context_dry_run_and_limit_never_generate(deck_path, config, tmp_path, fake_context):
-    output = tmp_path / "no" / "note.md"
+def test_more_new_slides_than_max_slides_stops_before_any_call(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    row = one(source, context=True, overrides={"generation": {"limits": {"max_slides": 2}}})
+    assert row["status"] == "error" and "max_slides=2" in row["message"]
+    assert not ai.slide_calls and not ai.rendered
     assert (
-        pipeline.build(deck_path, output, config, context=True, dry_run=True)["planned_ai_calls"]
-        == 3
+        one(
+            source,
+            context=True,
+            slides="1-2",
+            overrides={"generation": {"limits": {"max_slides": 2}}},
+        )["generatedSlides"]
+        == 2
     )
-    assert not output.parent.exists() and fake_context.calls == []
-    config["generation"]["max_slides"] = 1
-    with pytest.raises(NoteError):
-        pipeline.build(deck_path, output, config, context=True)
-    assert fake_context.calls == []
+    # Slides already explained do not count against the limit.
+    assert (
+        one(source, context=True, overrides={"generation": {"limits": {"max_slides": 2}}})[
+            "generatedSlides"
+        ]
+        == 1
+    )
 
 
-def test_generation_failure_keeps_previous_note(
-    deck_path, config, tmp_path, fake_context, monkeypatch
-):
-    output = tmp_path / "note.md"
-    pipeline.build(deck_path, output, config)
-    old = output.read_bytes()
-
-    def fail(*args, **kwargs):
-        raise NoteError("Provider failed")
-
-    monkeypatch.setattr(FakeGenerator, "generate", fail)
-    with pytest.raises(NoteError):
-        pipeline.build(deck_path, output, config, context=True)
-    assert output.read_bytes() == old
-    assert list(output.with_name(output.name + ".assets").glob("failed-*/evidence.json"))
-    assert not output.with_name(output.name + ".lock").exists()
+def test_unreferenced_results_are_removed_after_a_successful_run(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source, context=True)
+    folder = assets_dir(note_of(source)) / "slides"
+    assert len(list(folder.iterdir())) == 3
+    make_deck(source["decks"] / "deck.pptx", SLIDES[:2])
+    one(source, context=True)
+    assert len(list(folder.iterdir())) == 2
+    assert len(list((folder.parent / "deck").iterdir())) == 1
 
 
-def test_change_during_generation_preserves_note(
-    deck_path, config, tmp_path, fake_context, monkeypatch
-):
-    output = tmp_path / "note.md"
-    pipeline.build(deck_path, output, config)
-    old = output.read_bytes()
-    original = fake_render
+def test_one_file_many_files_and_missing_presentations(source):
+    make_deck(source["decks"] / "a.pptx", SLIDES)
+    (source["decks"] / "sub").mkdir()
+    make_deck(source["decks"] / "sub" / "b.pptx", SLIDES)
+    (source["decks"] / "~$a.pptx").write_text("lock")
+    (source["decks"] / "broken.pptx").write_text("not a zip")
+    rows = run(source)
+    assert {r["sourcePath"]: r["status"] for r in rows} == {
+        "a.pptx": "created",
+        "broken.pptx": "error",
+        "sub/b.pptx": "created",
+    }
+    assert (source["notes"] / "sub" / "b.pptx.md").is_file()
+    summary = summarize("pull", rows, Options())
+    assert (summary["status"], summary["errors"], summary["changed"]) == ("error", 1, 2)
+    (source["decks"] / "a.pptx").unlink()
+    (source["decks"] / "broken.pptx").unlink()
+    rows = run(source)
+    assert {r["sourcePath"]: r["status"] for r in rows} == {
+        "sub/b.pptx": "unchanged",
+        "a.pptx": "missing-source",
+    }
+    assert (source["notes"] / "a.pptx.md").is_file()
+    assert [r["status"] for r in run(source, file=Path("sub/b.pptx"))] == ["unchanged"]
 
-    def mutate(*args, **kwargs):
-        paths = original(*args, **kwargs)
-        with deck_path.open("ab") as stream:
-            stream.write(b"changed")
-        return paths
 
-    monkeypatch.setattr(pipeline, "render", mutate)
-    with pytest.raises(NoteError):
-        pipeline.build(deck_path, output, config, context=True)
-    assert output.read_bytes() == old
+def test_export_writes_beside_the_presentation_and_never_overwrites_silently(source, ai, tmp_path):
+    deck = make_deck(tmp_path / "talk.pptx", SLIDES)
+    config = source["load"]()
+    result = export(deck, None, config, Options())
+    output = tmp_path / "talk.pptx.md"
+    assert (result["status"], result["exported"]) == ("success", 1)
+    assert result["results"][0]["outputPath"] == str(output)
+    metadata, rest = read_frontmatter(output.read_text("utf-8"))
+    assert metadata["type"] == "PowerPointExport" and metadata["generationMethod"] == "text"
+    assert metadata["sourceSnapshotSha256"] == file_digest(deck)
+    assert BEGIN not in rest and rest.startswith("\n# Example Deck\n")
+    assert not (tmp_path / "img").exists()
+    again = export(deck, None, config, Options())
+    assert again["status"] == "error" and again["results"][0]["status"] == "export-error"
+    assert export(deck, None, config, Options(dry_run=True, force=True))["planned"] == 1
+    forced = export(deck, None, config, Options(force=True, context=True))
+    assert forced["aiCalls"] == 4 and (tmp_path / "img" / "talk.pptx" / "state.json").is_file()
+    assert export(deck, None, config, Options(force=True, context=True))["aiCalls"] == 0
+
+
+def test_export_a_folder_and_an_explicit_output(source, tmp_path):
+    folder = tmp_path / "many"
+    (folder / "sub").mkdir(parents=True)
+    make_deck(folder / "a.pptx", SLIDES)
+    make_deck(folder / "sub" / "b.pptx", SLIDES)
+    config = source["load"]()
+    assert export(folder, None, config, Options())["exported"] == 2
+    assert (folder / "sub" / "b.pptx.md").is_file()
+    with pytest.raises(pipeline.ConfigError):
+        export(folder, tmp_path / "x.md", config, Options())
+    target = tmp_path / "out" / "named.md"
+    assert export(folder / "a.pptx", target, config, Options())["exported"] == 1
+    assert target.is_file()
+    with pytest.raises(pipeline.ConfigError):
+        export(tmp_path / "absent.pptx", None, config, Options())

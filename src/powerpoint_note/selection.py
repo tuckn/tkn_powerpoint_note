@@ -5,63 +5,53 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .models import Deck, NoteError, Slide
+from .models import ConfigError, Deck, NoteError, Slide
+
+RANGE = re.compile(r"\s*(\d+)(?:\s*-\s*(\d+))?\s*")
 
 
 def format_slides(value: Any) -> str:
-    """Canonical compact notation for both legacy lists and range strings."""
-    if value in (None, ""):
+    """Compact notation such as `3-6` or `1-2,7-400` for a list of positions."""
+    if value in (None, "", []):
         return ""
-    spans: list[tuple[int, int]] = []
-    if isinstance(value, list):
-        if any(type(n) is not int or n < 1 for n in value):
-            raise NoteError("Slide properties require positive integers or inclusive ranges")
-        spans.extend((n, n) for n in value)
-    elif isinstance(value, str):
-        for item in value.split(","):
-            match = re.fullmatch(r"\s*(\d+)(?:\s*-\s*(\d+))?\s*", item)
-            if match is None:
-                raise NoteError("Invalid slide range property")
-            start, end = int(match[1]), int(match[2] or match[1])
-            if not 1 <= start <= end:
-                raise NoteError("Slide range property must be positive and ascending")
-            spans.append((start, end))
-    else:
-        raise NoteError("Slide properties require a list or range string")
+    if not isinstance(value, list) or any(type(n) is not int or n < 1 for n in value):
+        raise NoteError("Slide positions must be positive integers")
     ranges: list[list[int]] = []
-    for start, end in sorted(spans):
-        if not ranges or start > ranges[-1][1] + 1:
-            ranges.append([start, end])
+    for number in sorted(set(value)):
+        if ranges and number == ranges[-1][1] + 1:
+            ranges[-1][1] = number
         else:
-            ranges[-1][1] = max(ranges[-1][1], end)
+            ranges.append([number, number])
     return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges)
 
 
-def select(deck: Deck, settings: dict[str, Any]) -> list[Slide]:
-    spec = settings["slides"]
+def select(
+    deck: Deck, included: list[Slide], spec: str | None, sections: list[str] | None
+) -> list[Slide]:
+    """Slides of `included` that match `--slides` and `--section`; both must match if given."""
     numbers: set[int] | None = None
     if spec is not None:
         numbers = set()
         for item in spec.split(","):
-            match = re.fullmatch(r"\s*(\d+)(?:\s*-\s*(\d+))?\s*", item)
+            match = RANGE.fullmatch(item)
             if match is None:
-                raise NoteError("slides must contain page numbers or inclusive ranges, e.g. 1,3-5")
+                raise ConfigError("--slides takes positions or inclusive ranges, e.g. 1,3-5")
             start, end = int(match[1]), int(match[2] or match[1])
             if not 1 <= start <= end <= len(deck.slides):
-                raise NoteError(f"Slide range {item.strip()} is outside 1..{len(deck.slides)}")
+                raise ConfigError(f"Slide range {item.strip()} is outside 1..{len(deck.slides)}")
             numbers.update(range(start, end + 1))
-    sections = settings["sections"]
-    known = {s.section for s in deck.slides if s.section is not None}
-    missing = set(sections) - known
+    sections = sections or []
+    missing = set(sections) - {s.section for s in deck.slides if s.section is not None}
     if missing:
-        raise NoteError(f"Unknown section(s): {', '.join(sorted(missing))}; inspect the deck first")
+        raise ConfigError(
+            f"Unknown section(s): {', '.join(sorted(missing))}; "
+            "list them with presentation list-slides"
+        )
     selected = [
         s
-        for s in deck.slides
-        if (numbers is None or s.number in numbers)
-        and (not sections or s.section in sections)
-        and (settings["include_hidden"] or not s.hidden)
+        for s in included
+        if (numbers is None or s.number in numbers) and (not sections or s.section in sections)
     ]
     if not selected:
-        raise NoteError("No slides selected; check slide ranges, section names, and include_hidden")
+        raise ConfigError("No slides selected; check --slides, --section and hidden slides")
     return selected

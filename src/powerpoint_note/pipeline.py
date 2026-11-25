@@ -1,572 +1,578 @@
-"""Build immutable evidence bundles, then atomically publish a protected Markdown note."""
+"""Turn presentations into notes: plan per slide, reuse saved AI results, then publish."""
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import shutil
 import uuid
-from datetime import UTC, datetime
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import __version__
-from .context import Generator, generation_properties
+from .context import Generator, generator_label
 from .context_profiles import ContextProfile, load_profile
-from .extract import read_deck
+from .evidence import content_key, payload_text, slide_payload
+from .extract import SUFFIXES, read_deck
 from .frontmatter import (
-    GENERATED_BY_SCHEMAS,
-    NOTE_TYPE,
-    SCHEMA_VERSION,
-    normalize,
+    CONTEXT,
+    EXPORT_SCHEMA,
+    EXPORT_TYPE,
+    PROXY_SCHEMA,
+    PROXY_TYPE,
     now_iso,
-    profile_properties,
     source_properties,
     timestamp,
 )
-from .io import atomic_write, digest, file_digest, fingerprint, json_text
-from .markdown import compose, render_body, slide_evidence, split_note
-from .models import Deck, NoteError, Slide
+from .io import atomic_write, digest
+from .markdown import (
+    body_digest,
+    compose,
+    compose_export,
+    image_link,
+    render_body,
+    split_note,
+)
+from .models import ConfigError, Deck, NoteError, Slide
 from .render import check_renderable, preflight, render
 from .selection import format_slides, select
+from .sources import discover, missing_sources, note_path, resolve_file
+from .store import assets_dir, backup, cached, load_state, note_lock, prune, result_dir, save_state
 
 LOGGER = logging.getLogger("powerpoint_note")
+CHANGED = {"created", "updated", "exported"}
+FAILED = {"error", "export-error", "protected"}
 
 
-def default_output(source: Path) -> Path:
-    identity = digest(os.path.normcase(str(source.resolve())).encode())[:16]
-    return Path.home() / ".tkn/powerpoint_note/data" / identity / (source.name + ".md")
+@dataclass
+class Options:
+    context: bool = False
+    force: bool = False
+    dry_run: bool = False
+    slides: str | None = None
+    sections: list[str] = field(default_factory=list)
 
 
-def inspect(source: Path, config: dict[str, Any]) -> dict[str, Any]:
-    deck = read_deck(source, config["extraction"])
-    slides = select(deck, config["selection"])
+@dataclass
+class Target:
+    source: Path
+    note: Path
+    proxy: bool
+    identity: dict[str, Any] = field(default_factory=dict)
+    term_format: str = "plain"
+
+
+@dataclass
+class Plan:
+    """Everything known about one presentation before anything is written or sent."""
+
+    deck: Deck
+    included: list[Slide]
+    payloads: dict[str, str]
+    contents: dict[str, str]
+    records: dict[str, dict[str, Any]]
+    summary: dict[str, Any] | None
+    fresh: list[tuple[Slide, str]] = field(default_factory=list)
+    skipped: dict[str, str] = field(default_factory=dict)
+    reused: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+    def stale(self, slide_id: str) -> bool:
+        return bool(self.records[slide_id]["contentKey"] != self.contents[slide_id])
+
+    def current(self) -> list[Slide]:
+        return [
+            s for s in self.included if s.slide_id in self.records and not self.stale(s.slide_id)
+        ]
+
+    def summary_keys(self) -> list[list[Any]]:
+        return [[s.number, self.records[s.slide_id]["key"]] for s in self.current()]
+
+
+def _record(hit: dict[str, Any], key: str, content: str) -> dict[str, Any]:
+    usage = hit["usage"]
+    return {
+        "key": key,
+        "contentKey": content,
+        "profile": usage.get("prompt_profile", ""),
+        "generator": generator_label(usage),
+        "generatedAt": timestamp(usage.get("finished_at"), "generatedAt"),
+    }
+
+
+def _context_properties(plan: Plan) -> dict[str, Any]:
+    """Frontmatter that describes every explanation kept in the note, not only this run."""
+    records, summary = plan.records, plan.summary
+    with_context = [s for s in plan.included if s.slide_id in records]
+    stale = [s.number for s in with_context if plan.stale(s.slide_id)]
+    summary_stale = summary is not None and summary.get("slideKeys") != plan.summary_keys()
+    if not with_context and not summary:
+        return {"contextStatus": "not-generated"}
+    if stale or summary_stale:
+        status = "stale"
+    elif len(with_context) == len(plan.included):
+        status = "current"
+    else:
+        status = "partial"
+    profiles = {r["profile"] for r in records.values()} | (
+        {summary["profile"]} if summary else set()
+    )
+    times = [r["generatedAt"] for r in records.values() if r["generatedAt"]]
+    return {
+        "contextStatus": status,
+        "contextProfiles": sorted(p for p in profiles if p),
+        "contextAnalyzedSlides": format_slides([s.number for s in with_context]),
+        "contextOmittedSlides": format_slides(
+            [s.number for s in plan.included if s.slide_id not in records]
+        ),
+        "contextStaleSlides": format_slides(stale),
+        "contextSourceFingerprint": summary["sourceFingerprint"]
+        if summary
+        else plan.deck.content_fingerprint,
+        "contextGeneratedAt": summary["generatedAt"] if summary else max(times, default=""),
+    }
+
+
+def _body(target: Target, plan: Plan, profile: ContextProfile, off_slide: str) -> str:
+    assets = assets_dir(target.note)
+    contexts: dict[str, dict[str, Any]] = {}
+    for slide in plan.included:
+        record = plan.records.get(slide.slide_id)
+        hit = cached(assets, "slide", record["key"]) if record else None
+        if hit is None:
+            plan.records.pop(slide.slide_id, None)
+            continue
+        image = result_dir(assets, "slide", hit["usage"]["key"]) / "slide.png"
+        contexts[slide.slide_id] = {
+            "data": hit["data"],
+            "image": image_link(
+                f"{profile.labels['slide']} {slide.number}",
+                image.relative_to(target.note.parent).as_posix(),
+            )
+            if image.is_file()
+            else "",
+            "stale": plan.stale(slide.slide_id),
+        }
+    summary = None
+    if plan.summary:
+        hit = cached(assets, "deck", plan.summary["key"])
+        if hit is None:
+            plan.summary = None
+        else:
+            summary = hit["data"]
+    return render_body(
+        plan.deck,
+        plan.included,
+        profile,
+        off_slide=off_slide,
+        contexts=contexts,
+        summary=summary,
+        skipped=plan.skipped,
+    )
+
+
+def _generate(
+    target: Target, plan: Plan, generator: Generator, limits: dict[str, Any]
+) -> tuple[int, int]:
+    """Render and analyze the slides without a saved result, then the summary if it changed."""
+    assets = assets_dir(target.note)
+    deck = plan.deck
+    calls = generated = 0
+    if plan.fresh:
+        data = target.source.read_bytes()
+        if digest(data) != deck.source_sha256:
+            raise NoteError("Presentation changed while it was being read; save it and retry")
+        images = {
+            slide.number: result_dir(assets, "slide", key) / "slide.png"
+            for slide, key in plan.fresh
+        }
+        for image in images.values():
+            image.parent.mkdir(parents=True, exist_ok=True)
+        LOGGER.info("Rendering %d slide(s) with PowerPoint.", len(images))
+        render(data, images, limits["image_width"], limits["max_render_seconds"])
+        for slide, key in plan.fresh:
+            LOGGER.info("Generating context for slide %d.", slide.number)
+            folder = result_dir(assets, "slide", key)
+            generator.generate(
+                "slide", plan.payloads[slide.slide_id], images[slide.number], folder, key
+            )
+            calls += 1
+            generated += 1
+            hit = cached(assets, "slide", key)
+            if hit is None:
+                raise NoteError(f"Saved AI result for slide {slide.number} cannot be read back")
+            plan.records[slide.slide_id] = _record(hit, key, plan.contents[slide.slide_id])
+    current = plan.current()
+    if not current:
+        plan.summary = None
+        return calls, generated
+    keys = plan.summary_keys()
+    key = generator.key("deck", digest(payload_text(keys).encode("utf-8")))
+    hit = cached(assets, "deck", key)
+    if hit is None:
+        analyses = []
+        for slide in current:
+            saved = cached(assets, "slide", plan.records[slide.slide_id]["key"])
+            if saved is not None:
+                analyses.append({"slide": slide.number, "title": slide.title, **saved["data"]})
+        payload = payload_text({"slides": analyses})
+        if len(payload) > limits["max_input_chars"]:
+            plan.summary = None
+            plan.warnings.append(
+                f"Presentation summary skipped: slide explanations need {len(payload):,} "
+                f"characters; generation.limits.max_input_chars={limits['max_input_chars']:,}"
+            )
+            return calls, generated
+        LOGGER.info("Generating the presentation summary from %d slide(s).", len(analyses))
+        generator.generate(
+            "deck",
+            payload,
+            None,
+            result_dir(assets, "deck", key),
+            key,
+            allowed_slides={s.number for s in current},
+        )
+        calls += 1
+        hit = cached(assets, "deck", key)
+        if hit is None:
+            raise NoteError("Saved AI summary cannot be read back")
+    plan.summary = {
+        **_record(hit, key, ""),
+        "slideKeys": keys,
+        "sourceFingerprint": deck.content_fingerprint,
+    }
+    return calls, generated
+
+
+def process(target: Target, config: dict[str, Any], options: Options) -> dict[str, Any]:
+    """Create or update one note. Raises NoteError; the caller turns it into a result row."""
+    extraction, generation = config["extraction"], config["generation"]
+    limits = generation["limits"]
+    profile = load_profile(generation)
+    source, note = target.source, target.note
+    if note.suffix.lower() != ".md" or note == source:
+        raise ConfigError("Output must be a separate .md file")
+    LOGGER.info("Reading %s", source.name)
+    deck = read_deck(source, extraction)
+    included = [s for s in deck.slides if extraction["include_hidden"] or not s.hidden]
+    if not included:
+        raise NoteError("Every slide is hidden; set extraction.include_hidden to include them")
+    chosen = (
+        select(deck, included, options.slides, options.sections) if options.context else included
+    )
+    assets = assets_dir(note)
+    state = load_state(assets)
+    existing = note.read_text("utf-8-sig") if note.exists() else None
+    old_meta: dict[str, Any] = {}
+    before, after, old_body = "\n", "\n\n" + profile.labels["personal"] + "\n", None
+    if existing is not None and not target.proxy and not options.force:
+        raise NoteError(f"Output already exists; use --force to replace it: {note}")
+    if existing is not None and target.proxy:
+        old_meta, before, old_body, after = split_note(existing)
+        if old_meta.get("sourceId") != target.identity["sourceId"]:
+            raise NoteError("The existing note belongs to another presentation; it was not changed")
+
+    payloads = {
+        s.slide_id: payload_text(slide_payload(s, deck, extraction["off_slide"])) for s in included
+    }
+    contents = {
+        s.slide_id: content_key(s, payloads[s.slide_id], limits["image_width"]) for s in included
+    }
+    plan = Plan(
+        deck,
+        included,
+        payloads,
+        contents,
+        {sid: dict(r) for sid, r in state.get("slides", {}).items() if sid in contents},
+        dict(state["deck"]) if state.get("deck") else None,
+    )
+    off_slide = extraction["off_slide"]
+    edited = False
+    if old_body is not None and body_digest(old_body) != state.get("generatedSha256"):
+        # Without a matching record, the note is untouched only if it equals what we would write.
+        edited = body_digest(_body(target, plan, profile, off_slide)) != body_digest(old_body)
+    if edited and not options.force:
+        return {
+            "status": "protected",
+            "message": "The generated part of the note was edited by hand; "
+            "use --force to back it up and replace it.",
+        }
+
+    generator = None
+    summary_call = False
+    if options.context:
+        generator = Generator(generation, config["genai_profiles"], profile)
+        for slide in chosen:
+            sid = slide.slide_id
+            key = generator.key("slide", contents[sid])
+            hit = cached(assets, "slide", key)
+            if hit is not None:
+                plan.records[sid] = _record(hit, key, contents[sid])
+                plan.reused += 1
+            elif len(payloads[sid]) > limits["max_input_chars"]:
+                plan.skipped[sid] = (
+                    f"evidence needs {len(payloads[sid]):,} characters; "
+                    f"generation.limits.max_input_chars={limits['max_input_chars']:,}"
+                )
+            else:
+                plan.fresh.append((slide, key))
+        if len(plan.fresh) > limits["max_slides"]:
+            raise NoteError(
+                f"{len(plan.fresh)} slides need AI; generation.limits.max_slides="
+                f"{limits['max_slides']}. Select fewer with --slides or raise --max-slides. "
+                "No AI was called."
+            )
+        fresh_keys = {slide.slide_id: key for slide, key in plan.fresh}
+        after_run = []
+        for slide in included:
+            sid = slide.slide_id
+            if sid in fresh_keys:
+                after_run.append([slide.number, fresh_keys[sid]])
+            elif sid in plan.records and not plan.stale(sid):
+                after_run.append([slide.number, plan.records[sid]["key"]])
+        if after_run:
+            summary_key = generator.key("deck", digest(payload_text(after_run).encode("utf-8")))
+            summary_call = cached(assets, "deck", summary_key) is None
+        if plan.fresh:
+            preflight()
+            check_renderable(source.read_bytes())
+
+    planned = len(plan.fresh) + int(summary_call)
+    row: dict[str, Any] = {
+        "slides": len(included),
+        "aiCalls": 0,
+        "plannedAiCalls": planned,
+        "generatedSlides": 0,
+        "reusedSlides": plan.reused,
+        "skippedSlides": [
+            f"{s.number}: {plan.skipped[s.slide_id]}"
+            for s in included
+            if s.slide_id in plan.skipped
+        ],
+    }
+    would = (
+        ("would-update" if existing is not None else "would-create")
+        if target.proxy
+        else "would-export"
+    )
+    if options.dry_run and planned:
+        return {"status": would, **row}
+
+    def finish() -> dict[str, Any]:
+        calls = generated = 0
+        if generator is not None and (not options.dry_run or not planned):
+            # With nothing left to send, this only attaches results saved earlier.
+            calls, generated = _generate(target, plan, generator, limits)
+        body = _body(target, plan, profile, off_slide)
+        properties = _context_properties(plan)
+        if target.proxy:
+            metadata = {k: v for k, v in old_meta.items() if k not in CONTEXT}
+            metadata.update(
+                type=PROXY_TYPE,
+                schemaVersion=PROXY_SCHEMA,
+                **source_properties(deck.metadata, source.stem, target.term_format),
+                **target.identity,
+                sourceFullPath=str(source),
+                **properties,
+            )
+            stamp = now_iso()
+            for key, default in (("description", ""), ("cover", ""), ("tags", [])):
+                metadata.setdefault(key, default)
+            metadata.setdefault("created", stamp)
+            metadata["noteId"] = metadata.get("noteId") or str(uuid.uuid4())
+            metadata["updated"] = old_meta.get("updated") or stamp
+            text = compose(metadata, before, body, after)
+            if existing == text:
+                status = "unchanged"
+            else:
+                metadata["updated"] = stamp
+                text = compose(metadata, before, body, after)
+                status = "updated" if existing is not None else "created"
+        else:
+            metadata = {
+                "type": EXPORT_TYPE,
+                "schemaVersion": EXPORT_SCHEMA,
+                **source_properties(deck.metadata, source.stem),
+                "sourceFileName": source.name,
+                "sourceFullPath": str(source),
+                "sourceSnapshotSha256": deck.source_sha256,
+                "generatedAt": now_iso(),
+                "generationMethod": "context" if plan.records or plan.summary else "text",
+                **properties,
+            }
+            text = compose_export(metadata, body)
+            status = "exported"
+        result = {
+            "status": status,
+            **row,
+            "aiCalls": calls,
+            "plannedAiCalls": 0 if not options.dry_run else planned,
+            "generatedSlides": generated,
+            "contextStatus": properties["contextStatus"],
+            "staleSlides": properties.get("contextStaleSlides", ""),
+            "warnings": plan.warnings,
+        }
+        if options.dry_run:
+            return {**result, "status": would if status != "unchanged" else status}
+        if file_changed(note, existing) or digest(source.read_bytes()) != deck.source_sha256:
+            raise NoteError(
+                "Presentation or note changed during the run; the note was not replaced"
+            )
+        if status != "unchanged":
+            if edited and existing is not None:
+                result["backupPath"] = str(backup(note, existing))
+            atomic_write(note, text)
+        if target.proxy or plan.records or plan.summary:
+            new_state = {
+                "source": {
+                    "path": str(source),
+                    "sha256": deck.source_sha256,
+                    "fingerprint": deck.content_fingerprint,
+                },
+                "generatedSha256": body_digest(body),
+                "slides": plan.records,
+                "deck": plan.summary,
+            }
+            if new_state != {k: v for k, v in state.items() if k != "schemaVersion"}:
+                save_state(assets, new_state)
+            keep = {result_dir(assets, "slide", r["key"]) for r in plan.records.values()}
+            if plan.summary:
+                keep.add(result_dir(assets, "deck", plan.summary["key"]))
+            prune(assets, keep)
+        return result
+
+    if options.dry_run:
+        return finish()
+    with note_lock(note.with_name("." + note.name + ".lock")):
+        return finish()
+
+
+def file_changed(note: Path, existing: str | None) -> bool:
+    return (note.read_text("utf-8-sig") if note.exists() else None) != existing
+
+
+def _attempt(target: Target, config: dict[str, Any], options: Options) -> dict[str, Any]:
+    labels = (
+        {"sourcePath": target.identity["sourceFileName"], "notePath": str(target.note)}
+        if target.proxy
+        else {"inputPath": str(target.source), "outputPath": str(target.note)}
+    )
+    if target.proxy:
+        labels = {"sourceRoot": target.identity["sourceRoot"], **labels}
+        labels["presentationPath"] = str(target.source)
+    try:
+        return {**labels, **process(target, config, options)}
+    except (NoteError, OSError) as exc:
+        LOGGER.error("%s: %s", target.source.name, exc)
+        return {
+            **labels,
+            "status": "error" if target.proxy else "export-error",
+            "message": str(exc),
+        }
+
+
+def summarize(command: str, rows: list[dict[str, Any]], options: Options) -> dict[str, Any]:
+    counts = Counter(row["status"] for row in rows)
+    errors = sum(counts[status] for status in FAILED)
+    return {
+        "status": "error" if errors else "success",
+        "command": command,
+        "dryRun": options.dry_run,
+        "files": len(rows) - counts["missing-source"],
+        "changed": sum(counts[status] for status in CHANGED),
+        "errors": errors,
+        "statusCounts": dict(sorted(counts.items())),
+        "aiCalls": sum(row.get("aiCalls", 0) for row in rows),
+        "plannedAiCalls": sum(row.get("plannedAiCalls", 0) for row in rows),
+        "results": rows,
+    }
+
+
+def pull(
+    source_id: str, config: dict[str, Any], options: Options, file: Path | None = None
+) -> list[dict[str, Any]]:
+    """Create or update the proxy notes of one source. Notes are never deleted."""
+    spec = config["sources"][source_id]
+    known = discover(spec)
+    selected = [resolve_file(spec, file, known)] if file is not None else known
+    rows = []
+    for relative in selected:
+        target = Target(
+            Path(spec["presentations"]["dir"]) / relative,
+            note_path(spec, relative),
+            proxy=True,
+            identity={
+                "sourceId": f"{source_id}:{relative}",
+                "sourceRoot": source_id,
+                "sourceFileName": relative,
+            },
+            term_format=spec["notes"]["frontmatter_term_format"],
+        )
+        rows.append(_attempt(target, config, options))
+    if file is None:
+        rows.extend(missing_sources(spec, source_id, known))
+    return rows
+
+
+def export(
+    path: Path, output: Path | None, config: dict[str, Any], options: Options
+) -> dict[str, Any]:
+    """Write `<file>.md` beside each presentation, or one file to --output."""
+    path = path.expanduser().resolve()
+    if path.is_dir():
+        if output is not None:
+            raise ConfigError("--output cannot be used when the input is a folder")
+        sources = sorted(
+            p
+            for p in path.rglob("*")
+            if p.is_file() and p.suffix.lower() in SUFFIXES and not p.name.startswith("~$")
+        )
+        if not sources:
+            raise ConfigError(f"No .pptx or .pptm files found in: {path}")
+    elif path.is_file():
+        sources = [path]
+    else:
+        raise ConfigError(f"Input does not exist: {path}")
+    rows = []
+    for source in sources:
+        note = (
+            output.expanduser().resolve()
+            if output is not None
+            else source.with_name(source.name + ".md")
+        )
+        rows.append(_attempt(Target(source, note, proxy=False), config, options))
+    summary = summarize("export", rows, options)
+    counts = summary["statusCounts"]
+    return {
+        **{k: v for k, v in summary.items() if k not in {"changed", "results"}},
+        "exported": counts.get("exported", 0),
+        "planned": counts.get("would-export", 0),
+        "results": rows,
+    }
+
+
+def list_slides(path: Path, config: dict[str, Any]) -> dict[str, Any]:
+    path = path.expanduser().resolve()
+    deck = read_deck(path, config["extraction"])
     return {
         "status": "success",
-        "source_sha256": deck.source_sha256,
-        "total_slides": len(deck.slides),
-        "selected_slides": len(slides),
+        "command": "presentation list-slides",
+        "presentationPath": str(path),
+        "totalSlides": len(deck.slides),
+        "hiddenSlides": sum(s.hidden for s in deck.slides),
         "sections": list(dict.fromkeys(s.section for s in deck.slides if s.section is not None)),
         "slides": [
             {
                 "number": s.number,
-                "slide_id": s.slide_id,
+                "slideId": s.slide_id,
                 "title": s.title,
                 "section": s.section,
                 "hidden": s.hidden,
-                "page_number": s.page_number,
-                "objects": len(s.shapes),
-                "off_slide_objects": sum(x.location == "outside" for x in s.shapes),
-                "has_notes": bool(s.notes),
-                "comment_count": len(s.comments),
+                "shapes": len(s.shapes),
+                "offSlideShapes": sum(x.location == "outside" for x in s.shapes),
+                "hasNotes": bool(s.notes),
+                "comments": len(s.comments),
             }
-            for s in slides
+            for s in deck.slides
         ],
         "warnings": deck.warnings,
     }
-
-
-def safe_child(parent: Path, relative: str) -> Path:
-    path = (parent / relative).resolve()
-    if path == parent.resolve() or not path.is_relative_to(parent.resolve()):
-        raise NoteError("Evidence path escapes its bundle")
-    return path
-
-
-def validate_bundle(folder: Path) -> dict[str, Any]:
-    try:
-        manifest: dict[str, Any] = json.loads((folder / "manifest.json").read_text("utf-8"))
-        if manifest.get("schema_version") != "1.0.0" or manifest.get("status") != "complete":
-            raise NoteError("Evidence bundle is incomplete or has an unsupported schema")
-        if (
-            not isinstance(manifest.get("files"), dict)
-            or not {"body.md", "evidence.json"} <= manifest["files"].keys()
-        ):
-            raise NoteError("Evidence manifest lacks required files")
-        for name, expected in manifest["files"].items():
-            path = safe_child(folder, name)
-            if not path.is_file() or file_digest(path) != expected:
-                raise NoteError(f"Evidence is missing or modified: {name}")
-        return manifest
-    except (OSError, ValueError, TypeError, KeyError) as exc:
-        raise NoteError(
-            "Cannot read evidence bundle; restore it or rebuild to a different output"
-        ) from exc
-
-
-def context_properties(folder: Path, manifest: dict[str, Any]) -> dict[str, Any]:
-    """Describe the context actually retained in a completed evidence bundle."""
-    if "context.json" not in manifest["files"]:
-        return {
-            "contextStatus": "not-generated",
-            "contextProfiles": [],
-            "contextAnalyzedSlides": "",
-            "contextOmittedSlides": "",
-            "contextSourceFingerprint": "",
-            "contextGeneratedAt": "",
-        }
-    evidence = json.loads((folder / "evidence.json").read_text("utf-8"))
-    analyzed = evidence["selected_slides"]
-    omitted = [n for n in range(1, evidence["total_slides"] + 1) if n not in analyzed]
-    return {
-        "contextStatus": "partial" if omitted else "current",
-        "contextProfiles": [manifest["prompt_profile"]["name"]],
-        "contextAnalyzedSlides": format_slides(analyzed),
-        "contextOmittedSlides": format_slides(omitted),
-        "contextSourceFingerprint": manifest["context_source_fingerprint"],
-        "contextGeneratedAt": timestamp(
-            manifest.get("context_generated_at", manifest["created_at"]), "contextGeneratedAt"
-        ),
-    }
-
-
-def verify(note: Path, source: Path | None = None) -> dict[str, Any]:
-    metadata, _, body, _ = split_note(note.read_text("utf-8-sig"))
-    if digest(body.encode()) != metadata.get("generatedSha256"):
-        raise NoteError("Generated Markdown was edited")
-    folder = safe_child(note.parent, metadata["evidencePath"])
-    manifest = validate_bundle(folder)
-    evidence = json.loads((folder / "evidence.json").read_text("utf-8"))
-    if (folder / "body.md").read_text("utf-8") != body:
-        raise NoteError("Note and evidence body disagree")
-    if manifest["source_sha256"] != metadata.get("sourceSha256") or manifest[
-        "build_key"
-    ] != metadata.get("buildKey"):
-        raise NoteError("Note and evidence provenance disagree")
-    if (manifest.get("generation_generator") or "") != (metadata.get("generationGenerator") or ""):
-        raise NoteError("Note and evidence generation settings provenance disagree")
-    provenance = manifest.get("prompt_profile")
-    profile_matches = (
-        provenance == metadata.get("promptProfile")
-        if metadata["schemaVersion"] == "1.0.0"
-        else isinstance(provenance, dict)
-        and all(metadata.get(key) == value for key, value in profile_properties(provenance).items())
-    )
-    if not profile_matches:
-        raise NoteError("Note and evidence prompt profile provenance disagree")
-    if metadata["schemaVersion"] in {"2.1.0", *GENERATED_BY_SCHEMAS}:
-        if any(
-            (
-                format_slides(metadata.get(key))
-                if key in {"contextAnalyzedSlides", "contextOmittedSlides"}
-                else metadata.get(key)
-            )
-            != value
-            for key, value in context_properties(folder, manifest).items()
-        ):
-            raise NoteError("Note and evidence context provenance disagree")
-        if (
-            metadata.get("sourceFullPath") != metadata.get("sourceFile")
-            or metadata.get("sourceFileName") != Path(metadata["sourceFile"]).name
-        ):
-            raise NoteError("Note source location properties disagree")
-    if metadata["schemaVersion"] in GENERATED_BY_SCHEMAS:
-        if any(
-            metadata.get(key) != value
-            for key, value in generation_properties(folder, manifest["files"]).items()
-        ):
-            raise NoteError("Note and evidence model/effort provenance disagree")
-        if metadata.get("selectedSlides") != format_slides(evidence["selected_slides"]):
-            raise NoteError("Note and evidence slide selection disagree")
-        if metadata.get("generatedByVersion") != manifest["generator_version"]:
-            raise NoteError("Note and evidence tool version disagree")
-    original = source or Path(metadata["sourceFile"])
-    if not original.is_file() or file_digest(original) != metadata.get("sourceSha256"):
-        raise NoteError("Source is missing or changed since this note was built")
-    return {
-        "status": "verified",
-        "note": str(note),
-        "source_sha256": metadata["sourceSha256"],
-        "selected_slides": evidence["selected_slides"],
-        "context": metadata["context"],
-        "semantic_accuracy": "not assessed",
-    }
-
-
-def _existing(output: Path, source: Path, force: bool) -> tuple[str | None, dict[str, Any]]:
-    if not output.exists():
-        return None, {}
-    text = output.read_text("utf-8-sig")
-    metadata, _, body, _ = split_note(text)
-    if Path(metadata.get("sourceFile", "")).resolve() != source.resolve():
-        raise NoteError("Output belongs to another source; choose another --output")
-    if digest(body.encode()) != metadata.get("generatedSha256") and not force:
-        raise NoteError("Generated content was edited; use another --output or --force with backup")
-    return text, metadata
-
-
-def _evidence(deck: Deck, slides: list[Slide], config: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "schema_version": "1.0.0",
-        "source_sha256": deck.source_sha256,
-        "source_fingerprint": deck.content_fingerprint,
-        "source_size": deck.source_size,
-        "dimensions_emu": [deck.width, deck.height],
-        "metadata": deck.metadata,
-        "total_slides": len(deck.slides),
-        "selected_slides": [s.number for s in slides],
-        "selection": config["selection"],
-        "warnings": deck.warnings,
-        "slides": [slide_evidence(s, config["selection"]["off_slide"]) for s in slides],
-    }
-
-
-def _keyed_generation(generation: dict[str, Any], omitted: set[str]) -> dict[str, Any]:
-    """Hash the connection name under its 2.x key so earlier analyses stay reusable."""
-    return {
-        ("bridge_profile" if key == "genai_profile" else key): value
-        for key, value in generation.items()
-        if key not in omitted
-    }
-
-
-def _context_key(
-    evidence: dict[str, Any], config: dict[str, Any], profile: ContextProfile, plan: dict[str, Any]
-) -> str:
-    """Separate AI inputs from Markdown templates, note schema and tool version."""
-    return fingerprint(
-        {
-            "contract": "1.0.0",
-            "source": evidence["source_fingerprint"],
-            "evidence": {
-                key: value
-                for key, value in evidence.items()
-                if key not in {"source_sha256", "source_size", "metadata"}
-            },
-            "generation": _keyed_generation(
-                config["generation"],
-                {
-                    "generators",
-                    "default_generator",
-                    "profile_dirs",
-                    "max_slides",
-                    "max_input_chars",
-                    "render_timeout_seconds",
-                },
-            ),
-            "profile": {
-                "name": profile.name,
-                "language": profile.language,
-                "prompts": profile.prompts,
-                "schemas": profile.schemas,
-            },
-            "connection": {key: value for key, value in plan.items() if key != "reasoning_effort"},
-        }
-    )
-
-
-def _reusable_context(
-    output: Path,
-    old: dict[str, Any],
-    key: str,
-    build_inputs: dict[str, Any],
-    profile: ContextProfile,
-) -> tuple[Path, dict[str, Any]] | None:
-    if not old.get("context"):
-        return None
-    folder = safe_child(output.parent, old["evidencePath"])
-    manifest = validate_bundle(folder)
-    if "context.json" not in manifest["files"]:
-        raise NoteError("Context evidence is missing; restore the bundle before exporting")
-    if manifest.get("context_build_key") == key:
-        return folder, manifest
-    if "context_build_key" in manifest:
-        # Bridge version/reporting additions alone must not buy another analysis.
-        # Prove that all generation settings still match the archived slide plan,
-        # then reproduce its key with the historical Bridge version.
-        plan = build_inputs["connection"]
-        for name in sorted(manifest["files"]):
-            if not name.startswith("slide-") or not name.endswith(".usage.json"):
-                continue
-            usage = json.loads(safe_child(folder, name).read_text("utf-8"))
-            compared = set(plan) - {"bridge_version", "reasoning_effort"}
-            if not plan.get("generation_settings_sha256") or any(
-                usage.get(k) != plan[k] for k in compared
-            ):
-                return None
-            historical_plan = {k: usage[k] for k in plan if k != "reasoning_effort" and k in usage}
-            historical_key = _context_key(
-                build_inputs["evidence"],
-                {"generation": build_inputs["generation"]},
-                profile,
-                historical_plan,
-            )
-            if historical_key == manifest["context_build_key"]:
-                return folder, manifest
-            return None
-        return None
-    # Legacy bundles have no separate AI key. Prove the entire original build
-    # matches using its recorded tool version and a supported older note schema.
-    for schema in ("1.0.0", "2.0.0"):
-        candidate = {
-            **build_inputs,
-            "evidence": {
-                k: v for k, v in build_inputs["evidence"].items() if k != "source_fingerprint"
-            },
-            "version": manifest["generator_version"],
-            "note_schema_version": schema,
-        }
-        if fingerprint(candidate) == manifest["build_key"]:
-            return folder, manifest
-        if schema == "1.0.0":
-            candidate.pop("note_schema_version")
-            if fingerprint(candidate) == manifest["build_key"]:
-                return folder, manifest
-    return None
-
-
-def build(
-    source: Path,
-    output: Path,
-    config: dict[str, Any],
-    *,
-    context: bool = False,
-    dry_run: bool = False,
-    force: bool = False,
-    refresh: bool = False,
-) -> dict[str, Any]:
-    source, output = source.expanduser().resolve(), output.expanduser().resolve()
-    if output == source or output.suffix.lower() != ".md":
-        raise NoteError("Output must be a separate .md file")
-    if refresh and not context:
-        raise NoteError("--refresh requires --context")
-    profile = load_profile(config["generation"])
-    LOGGER.info("Reading presentation and selecting slides.")
-    deck = read_deck(source, config["extraction"])
-    slides = select(deck, config["selection"])
-    evidence = _evidence(deck, slides, config)
-    existing, old = _existing(output, source, force)
-    # Validate migrations and source dates before any writes, rendering or AI calls.
-    previous = normalize(old) if existing is not None else {}
-    source_fields = source_properties(deck.metadata)
-    generator = None
-    if context:
-        if len(slides) > config["generation"]["max_slides"]:
-            raise NoteError(
-                f"Selected {len(slides)} slides exceeds generation.max_slides={config['generation']['max_slides']}; select a smaller range or explicitly raise --max-slides"
-            )
-        for slide in evidence["slides"]:
-            if len(json_text({"slide": slide})) > config["generation"]["max_input_chars"]:
-                raise NoteError(
-                    f"Slide {slide['number']} exceeds generation.max_input_chars; no AI was called"
-                )
-        generator = Generator(
-            config["generation"], genai_profiles=config["genai_profiles"], content_profile=profile
-        )
-    build_inputs = {
-        "source": deck.source_sha256,
-        "evidence": evidence,
-        "generation": _keyed_generation(config["generation"], {"generators", "default_generator"})
-        if context
-        else {
-            "prompt_profile": profile.name,
-            "generator_id": config["generation"].get("generator_id"),
-        },
-        "context": context,
-        "version": __version__,
-        "note_schema_version": SCHEMA_VERSION,
-        "prompt_profile": profile.provenance(),
-        "connection": generator.plan if generator else None,
-    }
-    build_key = fingerprint(build_inputs)
-    context_key = _context_key(evidence, config, profile, generator.plan) if generator else None
-    if (
-        old.get("schemaVersion") == SCHEMA_VERSION
-        and old.get("buildKey") == build_key
-        and not refresh
-        and not force
-    ):
-        verify(output, source)
-        return {
-            "status": "unchanged",
-            "dry_run": dry_run,
-            "output": str(output),
-            "selected_slides": [s.number for s in slides],
-            "generation_generator": config["generation"].get("generator_id"),
-            "ai_calls": 0,
-        }
-    if old.get("reviewStatus") in {"reviewed", "accepted"} and not force:
-        raise NoteError(
-            "Reviewed note is protected; choose another --output or use --force with backup"
-        )
-    base = output.with_name(output.name + ".assets")
-    folder = base / build_key
-    if refresh:
-        folder = base / (build_key + "-" + uuid.uuid4().hex[:12])
-    cached = folder.is_dir() and not refresh
-    if cached:
-        validate_bundle(folder)
-    reused = (
-        _reusable_context(output, old, context_key, build_inputs, profile)
-        if context_key and not cached and not refresh
-        else None
-    )
-    if context and not cached and not reused:
-        preflight()
-        check_renderable(source.read_bytes())
-    status = "updated" if existing is not None else "created"
-    result: dict[str, Any] = {
-        "status": status,
-        "dry_run": dry_run,
-        "output": str(output),
-        "evidence": str(folder),
-        "selected_slides": [s.number for s in slides],
-        "total_slides": len(deck.slides),
-        "context": context,
-        "prompt_profile": profile.provenance(),
-        "generation_generator": config["generation"].get("generator_id"),
-        "ai_calls": (len(slides) + 1 if context and not cached and not reused else 0),
-        "reused_context": bool(reused),
-        "excluded_hidden": sum(s.hidden for s in deck.slides)
-        if not config["selection"]["include_hidden"]
-        else 0,
-    }
-    if generator:
-        result["connection"] = generator.plan
-    if dry_run:
-        result["planned_ai_calls"] = result["ai_calls"]
-        result["ai_calls"] = 0
-        result["planned_counts"] = {status: 1, "reused_bundles": int(cached)}
-        return result
-    output.parent.mkdir(parents=True, exist_ok=True)
-    lock = output.with_name(output.name + ".lock")
-    try:
-        handle = lock.open("x", encoding="utf-8")
-    except FileExistsError as exc:
-        raise NoteError(
-            "A note lock already exists; check for a running export before removing the stale lock"
-        ) from exc
-    staging: Path | None = None
-    try:
-        with handle:
-            handle.write(str(os.getpid()))
-        if (output.read_text("utf-8-sig") if output.exists() else None) != existing:
-            raise NoteError("Output changed during validation; retry")
-        if not cached:
-            base.mkdir(parents=True, exist_ok=True)
-            staging = base / ("pending-" + uuid.uuid4().hex)
-            staging.mkdir()
-            atomic_write(staging / "evidence.json", json_text(evidence))
-            contexts = None
-            context_generated_at = ""
-            if reused:
-                previous_folder, previous_manifest = reused
-                for name in previous_manifest["files"]:
-                    if name not in {"evidence.json", "body.md"}:
-                        destination = safe_child(staging, name)
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(safe_child(previous_folder, name), destination)
-                        if file_digest(destination) != previous_manifest["files"][name]:
-                            raise NoteError(
-                                "Context evidence changed during reuse; previous note preserved"
-                            )
-                contexts = json.loads((staging / "context.json").read_text("utf-8"))
-                context_generated_at = previous_manifest.get(
-                    "context_generated_at", previous_manifest["created_at"]
-                )
-                LOGGER.info("Reusing verified visual context; no AI calls.")
-            elif generator:
-                LOGGER.info("Rendering %d selected slides.", len(slides))
-                images = render(
-                    source,
-                    deck.source_sha256,
-                    [s.number for s in slides],
-                    staging,
-                    config["generation"]["image_width"],
-                    config["generation"]["render_timeout_seconds"],
-                )
-                analyses = {}
-                for slide, image in zip(evidence["slides"], images, strict=True):
-                    LOGGER.info("Generating context for slide %d.", slide["number"])
-                    analyses[str(slide["number"])] = generator.generate(
-                        "slide", {"slide": slide}, image, staging, f"slide-{slide['number']:04d}"
-                    )
-                summary = generator.generate(
-                    "deck", {"slides": list(analyses.values())}, None, staging, "deck"
-                )
-                contexts = {"slides": analyses, "deck": summary}
-                atomic_write(staging / "context.json", json_text(contexts))
-                context_generated_at = now_iso()
-            relative = folder.relative_to(output.parent).as_posix()
-            body = render_body(
-                deck, slides, relative + "/evidence.json", relative, config, profile, contexts
-            )
-            atomic_write(staging / "body.md", body)
-            manifest = {
-                "schema_version": "1.0.0",
-                "status": "complete",
-                "build_key": build_key,
-                "source_sha256": deck.source_sha256,
-                "generator_version": __version__,
-                "prompt_profile": profile.provenance(),
-                "generation_generator": config["generation"].get("generator_id"),
-                "context_build_key": context_key,
-                "context_source_fingerprint": deck.content_fingerprint if context else "",
-                "context_generated_at": context_generated_at,
-                "created_at": datetime.now(UTC).isoformat(),
-                "files": {
-                    p.relative_to(staging).as_posix(): file_digest(p)
-                    for p in staging.rglob("*")
-                    if p.is_file()
-                },
-            }
-            atomic_write(staging / "manifest.json", json_text(manifest))
-            validate_bundle(staging)
-            if file_digest(source) != deck.source_sha256:
-                raise NoteError("Source changed during export; previous note preserved")
-            staging.rename(folder)
-            staging = None
-        else:
-            body = (folder / "body.md").read_text("utf-8")
-        manifest = validate_bundle(folder)
-        now = now_iso()
-        metadata = {
-            "type": NOTE_TYPE,
-            "schemaVersion": SCHEMA_VERSION,
-            **source_fields,
-            "title": source_fields["title"] or source.stem,
-            "description": previous.get("description", ""),
-            "cover": previous.get("cover", ""),
-            "generatedBy": "tkn-powerpoint-note",
-            "generatedByVersion": __version__,
-            **generation_properties(folder, manifest["files"]),
-            **profile_properties(profile.provenance()),
-            "generationGenerator": config["generation"].get("generator_id"),
-            "sourceFile": str(source),
-            "sourceFileName": source.name,
-            "sourceFullPath": str(source),
-            "sourceSha256": deck.source_sha256,
-            "selectedSlides": format_slides([s.number for s in slides]),
-            "context": context,
-            **context_properties(folder, manifest),
-            "buildKey": build_key,
-            "evidencePath": folder.relative_to(output.parent).as_posix(),
-            "reviewStatus": "unreviewed",
-            "tags": previous.get("tags", []),
-            "created": previous.get("created", "") if existing is not None else now,
-            "updated": now,
-            "noteId": previous.get("noteId") or str(uuid.uuid4()),
-        }
-        text = compose(existing, metadata, body, profile)
-        split_note(text)
-        if (output.read_text("utf-8-sig") if output.exists() else None) != existing or file_digest(
-            source
-        ) != deck.source_sha256:
-            raise NoteError("Source or note changed before publication; previous note preserved")
-        if force and existing is not None:
-            backup = output.with_name(output.name + ".backup-" + digest(existing.encode())[:16])
-            if not backup.exists():
-                atomic_write(backup, existing)
-            result["backup"] = str(backup)
-        atomic_write(output, text, overwrite=existing is not None)
-        result["verified"] = verify(output, source)["status"]
-        return result
-    except BaseException:
-        if staging is not None and staging.exists():
-            failed = base / ("failed-" + staging.name.removeprefix("pending-"))
-            staging.rename(failed)
-            LOGGER.error("Previous note preserved. Failed-run evidence: %s", failed)
-        raise
-    finally:
-        lock.unlink(missing_ok=True)

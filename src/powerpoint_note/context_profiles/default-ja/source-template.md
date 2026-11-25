@@ -1,36 +1,31 @@
-## スライド {{number}}: {{title}}
+### スライド {{number}}: {{title}}
 
-- スライドID: {{slide_id}}; ページ番号: {{page_number}}; 非表示: {{hidden}}
 {{#section}}
-- セクション: {{section}}
+セクション: {{section}}
 {{/section}}
-
-{{#image}}
-{{image}}
-{{/image}}
 
 {{#context}}
 {{context}}
 {{/context}}
 
-### 抽出内容
+#### Extracted Text
 
 {{content}}
 
 {{#notes}}
-### 発表者ノート（原文）
+#### 発表者ノート
 
 {{notes}}
 {{/notes}}
 
 {{#comments}}
-### コメント（原文）
+#### コメント
 
 {{comments}}
 {{/comments}}
 
 {{#outside}}
-### スライド外の補足（表示内容とは別）
+#### スライド外の要素
 
 {{outside}}
 {{/outside}}

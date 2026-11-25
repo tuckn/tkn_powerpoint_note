@@ -1,19 +1,33 @@
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 
-# No source catalog or pull/push synchronization.
-selection:
-  slides: null
-  sections: []
-  include_hidden: false
-  off_slide: exclude # exclude or append; fully outside shapes only
+# Synchronization targets for pull and status (--source ID). export does not use them.
+sources:
+  personal-powerpoint:
+    presentations:
+      dir: 'C:\path\to\powerpoint-presentations'
+      recursive: false
+      include:
+        - "*.pptx"
+        - "*.pptm"
+      ignore: []
+    notes:
+      dir: 'C:\path\to\obsidian-vault\reference\entities\files\PowerPoint'
+      frontmatter_term_format: obsidian-link # obsidian-link ([[...]]) or plain
+    # Optional source-specific generation settings:
+    # generation:
+    #   generator: my-codex-def
 
 extraction:
+  include_hidden: false
+  off_slide: exclude # exclude or append; fully outside shapes only
   include_notes: true
   include_comments: true
   max_file_mb: 100
   max_uncompressed_mb: 1024
 
-# Generative AI connections live in this file. No GenAI Bridge config file is read.
+# Optional `export --context` and `pull --context` use GenAI Bridge.
+# Connections/models/authentication are owned by this application in genai_profiles.
+# GenAI Bridge shared configuration is never loaded.
 # CLI providers reuse their existing login; tokens and passwords do not belong here.
 genai_profiles:
   codex-default:
@@ -30,21 +44,22 @@ genai_profiles:
     model: null
 
 generation:
-  # CLI --generator > this default; null uses the shared generation settings.
+  # Reusable generation settings. CLI --generator > source generation.generator > this default.
   default_generator: my-codex-def
   generators:
     my-codex-def:
       genai_profile: codex-default # selects a connection from genai_profiles above
-      prompt_profile: default-ja # templates own the language and structure
+      # Templates define the language and structure; use default-en for English.
+      prompt_profile: default-ja
       overrides: {} # model, reasoning_effort, timeout_seconds, max_output_tokens, local_only
     my-codex-en:
       genai_profile: codex-default
       prompt_profile: default-en
 
-  # --genai-profile / --prompt-profile override the selected generator for one invocation.
-  # Ordinary extraction uses the prompt profile without calling AI; AI requires --context.
-  profile_dirs: [] # ordered parent directories containing complete profile bundles
-  max_slides: 10 # safety limit per context export; never silently truncate
-  max_input_chars: 120000
-  image_width: 2400
-  render_timeout_seconds: 180
+  # Ordered parent directories for custom prompt profiles (resolved from the working directory).
+  prompt_profile_dirs: []
+  limits:
+    max_slides: 10 # Slides sent to AI per presentation in one run; reused slides do not count.
+    max_input_chars: 120000 # Evidence JSON per slide; a slide over the limit is skipped.
+    image_width: 2400 # Pixels (600-8000). Changing it regenerates explanations.
+    max_render_seconds: 600 # PowerPoint rendering of one presentation.

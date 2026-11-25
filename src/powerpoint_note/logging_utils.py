@@ -48,9 +48,11 @@ class ColorFormatter(logging.Formatter):
         return f"{color}{value}\x1b[0m" if color else value
 
 
-def configure(quiet: bool = False, verbose: bool = False) -> logging.Logger:
+def configure(
+    quiet: bool = False, verbose: bool = False, *, no_color: bool = False
+) -> logging.Logger:
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(ColorFormatter(supports_color(sys.stderr)))
+    handler.setFormatter(ColorFormatter(not no_color and supports_color(sys.stderr)))
     logger = logging.getLogger("powerpoint_note")
     logger.handlers.clear()
     logger.addHandler(handler)

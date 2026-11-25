@@ -1,29 +1,26 @@
 ---
-version: 1.0.0
+version: 2.0.0
 language: English
 labels:
-  local: Extracted text and structure. Visual relationships and color meanings have
-    not been interpreted by AI.
-  ai: AI explanations use slide images and extracted evidence. Distinguish source
-    statements from inference.
-  personal: Add your own notes below this line.
-  evidence: Source evidence
-  slide: Slide
-  column: Column
-  merged_cells: Merged cells are recorded in the evidence JSON.
-  chart: Chart
-  smartart: SmartArt
-  object: Object
-  endpoints: Endpoints/style (no inferred semantics)
-  text: text
-  location_outside: outside
-  location_partial: partial
-  location_unknown: unknown
-  hidden_yes: 'yes'
-  hidden_no: 'no'
-  unknown_value: unknown
+  personal: "Add your own notes below this line."
+  slide: "Slide"
+  column: "Column"
+  merged_cells: "This table has merged cells; each value appears in the top-left cell of its merge."
+  chart: "Chart"
+  smartart: "SmartArt"
+  picture: "Picture"
+  location_outside: "off slide"
+  location_partial: "partly off slide"
+  location_unknown: "position unknown"
+  stale: "The slide changed after this explanation was generated. Run with `--context` to update it."
+  skipped: "No explanation was generated for this slide"
 ---
-### Slide context (AI generated)
+#### Slide context (AI generated)
+
+{{#stale}}
+> [!WARNING]
+> {{stale}}
+{{/stale}}
 
 {{summary}}
 
@@ -32,7 +29,13 @@ labels:
 {{/sections}}
 
 {{#uncertainties}}
-#### Uncertainties
+##### Uncertainties
 
 {{uncertainties}}
 {{/uncertainties}}
+
+{{#image}}
+##### Source image
+
+{{image}}
+{{/image}}

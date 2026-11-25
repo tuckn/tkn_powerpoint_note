@@ -1,229 +1,445 @@
-# Tkn PowerPoint Note — PowerPoint を Markdown にする
+# Tkn PowerPoint Note — PowerPoint を Markdown ノートにする CLI
 
-`tkn-powerpoint-note` は、PowerPoint の内容を、人と生成 AI が理解・参照できる Markdown ノートにします。
-通常は文字と構造をローカルで抽出し、`--context` を付けるとスライド画像から図・矢印・配置・色の意味を文章化します。
+`tkn-powerpoint-note` は、PowerPoint のファイル（`.pptx` / `.pptm`）を、Frontmatter 付きの Markdown に変換するコマンドラインツールです。
+スライドの文字・表・発表者ノートに加えて、図・矢印・配置・色で表した内容も、生成 AI でスライド画像から読み取り、文章で説明できます。
+Obsidian などのノート、全文検索、RAG（検索結果を生成 AI の入力に使う仕組み）から PowerPoint の内容を参照しやすくすることが目的です。
 
-たとえば、構成図に描かれたシステム同士の関係とその意味を説明し、元のスライド番号へ戻れるノートを作れます。
-抽出した原文、発表者ノート、コメント、AI の説明は別の見出しにまとめます。
-ファイル単位の変換ツールであり、`sources` の登録、`pull/push` 同期、PowerPoint への書き戻しは実装していません。
+初めて使う場合は、「[これは何か](#1-これは何か)」から「[1つの PowerPoint を Markdown にする](#3-1つの-powerpoint-を-markdown-にする)」までを順に読んでください。
+フォルダの PowerPoint を継続的にノートにする場合は、続けて「[フォルダを継続的に取り込む](#4-フォルダを継続的に取り込む)」を読みます。
+「[コマンド一覧](#5-コマンド一覧)」以降は、必要になったときに参照する内容です。
 
-## インストールする
+## 1. これは何か
 
-Python 3.11 以降と uv を用意します。
-以下のフォルダを実際のリポジトリへ置き換えて実行してください。
+### 1.1. 得られる結果の例
+
+次は、構成図のあるスライドを、AI の説明付きで書き出した例です。
+内容は架空の説明例で、Frontmatter と本文の一部を省略しています。
+
+```shell
+tkn-powerpoint-note export "C:\path\to\移行計画.pptx" --context --slides "2"
+```
+
+同じフォルダに `移行計画.pptx.md` が作成されます。
+
+```markdown
+---
+type: PowerPointExport
+schemaVersion: "1.0"
+title: "移行計画"
+author: Example User
+sourceFileName: 移行計画.pptx
+sourceFullPath: 'C:\path\to\移行計画.pptx'
+sourceModified: "2026-09-30T18:20:00+09:00"
+generationMethod: context
+contextStatus: partial
+contextAnalyzedSlides: "2"
+---
+
+# 移行計画
+
+## Presentation Map
+
+| Slide | ID | Title | Section | State | Text shapes | Pictures | Tables | Charts | Notes | Comments |
+| ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: |
+| 1 | 256 | 移行計画 | — | visible | 2 | 0 | 0 | 0 | — | 0 |
+| 2 | 257 | 移行後の構成 | 構成 | visible | 6 | 1 | 0 | 0 | yes | 0 |
+
+## スライド
+
+### スライド 2: 移行後の構成
+
+#### スライドの説明（AI生成）
+
+旧ファイルサーバーから新ストレージへ、中継サーバーを経由して複製する構成を示しています。
+複製の検証に失敗した場合は、切り替えに進まず事前準備へ戻る矢印が描かれています。
+
+##### 出典画像
+
+![スライド 2](img/移行計画.pptx/slides/0123456789abcdef/slide.png)
+
+#### Extracted Text
+
+- 旧ファイルサーバー
+- 中継サーバー（差分同期を2回実施）
+- 新ストレージ
+```
+
+`--context` を付けない場合は、AI を使わずに「Presentation Map」（全スライドの一覧）と、スライドごとの「Extracted Text」（文字・表・グラフの値）、発表者ノート、コメントだけを書き出します。
+
+### 1.2. 2つの使い方
+
+| 使い方 | コマンド | 向いている用途 | 出力 |
+| --- | --- | --- | --- |
+| 書き出し | `export` | 1つの PowerPoint やフォルダを、その場で Markdown にする | 各ファイルの隣の `<ファイル名>.md`（`type: PowerPointExport`） |
+| 取り込み | `pull` | 決まったフォルダの PowerPoint を、ノートとして継続的に管理する | ノート用フォルダの代理ノート（`type: PowerPoint`） |
+
+どちらも、PowerPoint が原本です。
+PowerPoint のファイルは読み取るだけで、変更しません。
+Markdown の内容を PowerPoint へ書き戻す機能はありません。
+
+### 1.3. 用語
+
+| 用語 | 意味 |
+| --- | --- |
+| 代理ノート | `pull` で作成・更新する Markdown ノートです。1つの PowerPoint に1つのノートが対応します。 |
+| source | 入力フォルダと代理ノートの保存先を組にした取り込み対象です。設定ファイルの `sources.<id>` に定義し、`--source <id>` で選びます。 |
+| context | AI が生成するスライドごとの説明と、資料全体の要約です。`--context` を指定したときだけ生成します。 |
+| generator | AI の接続先と文章の profile の組に名前を付けた設定です。`--generator <id>` で切り替えます。 |
+| 文章の profile | context の構成・言語・見出しを決める、プロンプト・出力スキーマ・テンプレートの組です。既定は日本語の `default-ja` です。 |
+
+### 1.4. 全体像
+
+長方形は処理、円筒形はデータ、六角形は外部の AI サービスを表します。
+破線は、`--context` を指定したときだけ使う経路です。
+
+```mermaid
+flowchart LR
+    deck[("PowerPoint<br/>（原本・読み取りのみ）")]
+    export["export<br/>書き出す"]
+    exported[("書き出した Markdown<br/>type: PowerPointExport")]
+    pull["pull<br/>更新を取り込む"]
+    note[("代理ノート<br/>type: PowerPoint")]
+    saved[("保存した AI の結果<br/>img/")]
+    ai{{"生成 AI<br/>GenAI Bridge 経由"}}
+
+    deck --> export --> exported
+    deck --> pull --> note
+    export -.->|スライド画像・抽出文字| ai
+    pull -.->|スライド画像・抽出文字| ai
+    ai -.-> saved
+    saved -.->|変更のないスライドは再利用| pull
+```
+
+AI の呼び出しは、画像対応モデルへの接続を共通化するライブラリ [GenAI Bridge](https://github.com/tuckn/tkn_genai_bridge)（`tkn_genai_bridge`）を通して行います。
+接続先・モデル・認証は、GenAI Bridge の共有設定ではなく、この CLI の設定ファイルの `genai_profiles` で管理します。
+
+## 2. セットアップ
+
+### 2.1. 前提
+
+| 使う機能 | 必要なもの |
+| --- | --- |
+| AI を使わない書き出し・取り込み | Python 3.11 以降、[uv](https://docs.astral.sh/uv/) |
+| `--context`（AI による説明の生成） | 上記に加えて、Windows、デスクトップ版 Microsoft PowerPoint、画像入力に対応する AI 接続先 |
+
+`--context` 以外の処理は、PowerPoint のファイルを直接読み取るため、PowerPoint を起動しません。
+動作確認は Windows で行っています。
+
+### 2.2. インストール
+
+ターミナルでリポジトリのフォルダへ移動し、CLI をインストールします。
+依存ライブラリの GenAI Bridge は、インストール時に GitHub から取得します。
 
 ```shell
 cd "C:\path\to\tkn_powerpoint_note"
 uv tool install .
-tkn-powerpoint-note --help
 tkn-powerpoint-note --version
 ```
 
-バージョン番号が表示されれば、インストールを確認できます。
-通常の文字抽出には、PowerPoint 本体や AI の契約・設定は不要です。
-GenAI Bridge と、Windows 用の画像化に必要な Python 依存関係は、`uv tool install .` でまとめてインストールされます。
-視覚的な context を生成する場合は、Windows とデスクトップ版 Microsoft PowerPoint を用意します。
+バージョン番号が表示されれば、インストールは完了です。
+コマンドとオプションの一覧は `tkn-powerpoint-note --help`、各コマンドの詳細は `tkn-powerpoint-note export --help` のように確認できます。
 
-AI の呼び出しは、画像を扱える [GenAI Bridge](https://github.com/tuckn/tkn_genai_bridge) を通して行います。
-接続先・モデルは、この CLI の設定ファイルの `genai_profiles` で管理します。
-Bridge の設定ファイル `~/.tkn/genai_bridge/config.yaml` は読まないため、この CLI のインストールだけで動作します。
-既定の接続先は認証済みの Codex CLI（`codex-default`）です。
-`generation.generators.<id>.genai_profile` は `genai_profiles` の接続先を選びます。
-`prompt_profile` は、言語・プロンプト・出力構造をまとめたプロファイルを選びます。
+### 2.3. AI 接続を準備する（`--context` を使う場合）
 
-## 最初のノートを作る
+AI を使わない場合、この手順は不要です。
 
-PowerPoint を保存してから、スライド番号とセクション名を確認し、ノートを生成・検証します。
+`--context` は、この CLI の `config.yaml` の `genai_profiles` に定義した接続先を使います。
+既定の接続先 `codex-default` は、ログイン済みの Codex CLI を使います。
+ほかの接続先やモデルを使う場合は、`tkn-powerpoint-note config init` で設定ファイルを作り、`genai_profiles` と `generation.generators` を書き換えます。
+設定項目は「[設定リファレンス](docs/reference/configuration.md#ai-生成の設定)」を参照してください。
 
-```shell
-tkn-powerpoint-note inspect "C:\path\to\deck.pptx"
-tkn-powerpoint-note export "C:\path\to\deck.pptx" --output "C:\path\to\deck.pptx.md"
-tkn-powerpoint-note verify "C:\path\to\deck.pptx.md"
-```
+## 3. 1つの PowerPoint を Markdown にする
 
-`export` は Markdown と、同じフォルダに根拠情報を保存するフォルダを作成します。
-`--output` を省略すると、`~/.tkn/powerpoint_note/data/` の下へ、元ファイルのパスごとに分けて保存します。
-原本の PowerPoint は常に読み取り専用です。
+`export` は、設定ファイルを用意せずに使えます。
+PowerPoint で編集中のファイルは、先に保存してから実行します。
 
-`--dry-run` を付けると、入力・選択範囲・設定・既存ノートの保護条件を確認し、変更予定だけを表示します。
-ファイル作成、PowerPoint の起動、認証、通信、AI 呼び出しは行いません。
-標準出力には1行1項目の `key=value` 形式で最終結果を出力し、標準エラーには進捗を出力します。
-機械処理には `--json` を明示します。`--json` はコマンドの前後に指定でき、通常表示とJSONで処理内容・終了コードは変わりません。
-`--quiet` / `--verbose` はログ量だけを変えます。出力形式はパイプやリダイレクトでも自動切替しません。
-通常の成功は終了コード0、入力・設定などの予期される失敗は2、予期しない失敗は1、中断は130です。
-結果には `status` と対象を示す項目を含め、エラー時は `error` と対象パスを別項目に表示します。
-このCLIは一覧項目を省略しないため、`--full-output` は設けていません。
+### 3.1. 最初の書き出し
+
+まず AI を使わずに書き出し、出力を確認します。
 
 ```shell
-tkn-powerpoint-note inspect "C:\path\to\deck.pptx"
-tkn-powerpoint-note --json inspect "C:\path\to\deck.pptx"
+tkn-powerpoint-note export "C:\path\to\deck.pptx"
 ```
 
-## 対象スライドを選び、context を生成する
+PowerPoint と同じフォルダに `deck.pptx.md` が作成されます。
+完了すると、標準出力に1行ごとの `key=value` で結果が表示されます。
+`status=success` と `exported=1` が表示されれば、書き出しは成功しています。
+
+出力先を指定する場合は `--output` を使います。
 
 ```shell
-tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2,5-8" --output "C:\path\to\selection.md"
-tkn-powerpoint-note export "C:\path\to\deck.pptx" --section "Architecture" --slides "1-20"
-tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2-3" --context --dry-run
-tkn-powerpoint-note export "C:\path\to\deck.pptx" --slides "2-3" --context
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --output "C:\path\to\notes\deck.md"
 ```
 
-スライド番号は、ファイル内の並び順を 1 から数えた位置です。
-範囲の両端を含み、複数のセクションは `--section` を繰り返して指定します。
-セクション名は完全一致で、ページ範囲を同時指定すると両方に該当するスライドを選びます。
+非表示のスライドは、既定でノートに含めません（`--include-hidden` で含めます）。
+完全にスライドの外にある要素も既定で除外し、`--off-slide append` で別の欄に含められます。
 
-非表示スライドは既定で除外し、`--include-hidden` で含められます。
-完全にスライド外にある要素も既定で除外し、`--off-slide append` で別枠の補足として含められます。
-一部だけはみ出す要素は全文を残し、そのことを明示します。
+### 3.2. AI による説明を付ける
+
+`--context` を付けると、スライドを画像にして AI で解析し、スライドごとの説明と資料の要約を Markdown に追加します。
 
 > [!IMPORTANT]
-> `--context` は、選択スライドの画像・抽出文字・有効な発表者ノートやコメントを設定済み AI 接続先へ送信し、費用や利用枠を消費する場合があります。
-> 未生成の場合、スライドごとに 1 回、選択範囲の統合説明に 1 回呼び出します。
-> 既定の上限は 10 スライドです。上限超過時は開始前に停止し、対象を勝手に切り詰めません。
+> `--context` は、対象のスライドの画像・抽出した文字・発表者ノート・コメントを、設定した AI 接続先へ送信します。
+> まだ説明のないスライドごとに1回と、資料の要約に1回、AI を呼び出します。接続先によっては費用や利用枠を消費します。
+> 送信先と費用の扱いを確認してから実行してください。
 
-画像化するのも選択したスライドだけです。
-スライド外の補足は抽出情報として渡し、画像には含めません。
-対応範囲と制約は [処理・出力仕様](docs/reference/behavior.md) を参照してください。
+最初は `--dry-run` で、呼び出しの回数（`plannedAiCalls`）を確認します。
+`--dry-run` は PowerPoint の起動、AI の呼び出し、ファイルの保存を行いません。
 
-## 更新と手書き部分の保護
+```shell
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --context --slides "2-3" --dry-run
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --context --slides "2-3"
+```
 
-原本を保存した後、同じ `export` を再実行すると更新できます。
-入力と生成条件が同一なら、既存の根拠を検証して再利用し、`unchanged` を返します。
-`contextSourceFingerprint` に解析したPowerPoint内容の指紋、`contextProfiles` に使用profile（例: `default-ja`）を残します。
-原本・対象範囲・AI生成条件が同じなら、ノート形式・表示テンプレート・ツールのバージョンだけの変更ではVLMを再実行しません。
-文書プロパティやZIPの格納方法だけの変更でも解析結果を再利用し、原本メタデータとファイル全体の `sourceSha256` は更新します。
-明示的に再解析する場合は `--context --refresh` を指定します。ノートと `.assets` を一緒に保持してください。
-生成部分は今回の選択範囲で置き換わり、以前の別範囲を蓄積する方式ではありません。
-`--context` を付けずに再生成すると、以前のノートに AI の説明があっても、抽出のみの内容になります。
-範囲や生成方式ごとに残す場合は、出力先を分けてください。
+`--slides` と `--section` は、説明を付けるスライドを選びます。
+スライド番号は、ファイル内の並び順を 1 から数えた位置で、範囲の両端を含みます。
+セクション名は完全一致で、`--section` は繰り返し指定できます。
+両方を指定すると、両方に当てはまるスライドを選びます。
+番号とセクション名は `presentation list-slides` で確認できます。
 
-生成マーカーの外側の文章と、CLI が管理しない Frontmatter 項目は保持します。
-生成部分への手編集と、`reviewStatus: reviewed` / `accepted` のノートは保護します。
+```shell
+tkn-powerpoint-note presentation list-slides --presentation "C:\path\to\deck.pptx"
+```
 
-Frontmatter は Obsidian 向けの平坦な構造です。先頭は `type` → `schemaVersion` → `title` → `description` → `cover`、
-末尾は `tags` → `created` → `updated` → `noteId` とし、中間を原本情報・選択範囲・context生成情報・検証情報にまとめます。
-PowerPointのメタデータは `title`・`subject`・`author`・`keywords`・`categories`・`comments`・`sourceCreated`・`sourceModified` として展開します。
-Excel側と同じ `sourceFileName`・`sourceFullPath`、`contextStatus`・`contextAnalyzedSlides`・`contextOmittedSlides`・`contextGeneratedAt` も記録します。
-`selectedSlides`・`contextAnalyzedSlides`・`contextOmittedSlides` は `3-6`、`1-2,7-400` のような範囲文字列で記録します。本文の対象範囲も同じ表記です。
-AI生成時の `generator` は `codex (gpt-6.1-sol)` のように表示し、`generationModel`（指定モデル）・`generationResponseModel`（返却モデル）・`generationReasoningEffort`（Bridgeが返した要求Effort）を保存します。
-Effortの実際の採用値や、取得できなかったモデル名は推測しません。ノート作成ツールは `generatedBy`・`generatedByVersion` に記録します。
-日時は原則として `"2026-06-21T05:44:56+09:00"` の形式で、日付しか分からない値は日付のまま保持します。
-新規ノートは Frontmatter の後に空行と H1 を置きます。
-`type` は固有名詞のまま引用符なしの `PowerPoint`、`schemaVersion` は `"4.0.0"` です。
-旧形式のノート（`type: powerpoint` を含む schema 3.0.0 以前）は次回の `export` 時に schema 4.0.0 へ更新し、`sourceMetadata` を平坦化、`date` を `created` へ引き継ぎます。
-今回の表記変更やBridge更新では、生成条件が一致する既存の解析を再利用します。モデル名・Effortは保存済みの各呼び出し記録から復元し、古い記録で未取得なら空欄にします。
-既存の作成日時・ノートID・タグ・表紙・説明・手書き部分を保持し、`date` と `created` の矛盾は上書きせずエラーにします。
-詳細は [Frontmatter仕様](docs/reference/behavior.md#frontmatter) を参照してください。
+1回の実行で AI に送るスライドは、既定で1資料あたり 10 枚までです。
+超える場合は AI を呼ぶ前に止まり、対象を勝手に切り詰めません。
+`--max-slides` で上限を変えるか、`--slides` で範囲を分けて実行します。
+説明の済んだスライドは再利用するため、上限には数えません。
 
-> [!WARNING]
-> `--force` は旧ノートをバックアップしてから、保護された生成部分を置き換えます。
-> マーカー外の手書き部分は保持します。無関係な Markdown や、別の PowerPoint のノートは置き換えられません。
+画像化には、デスクトップ版 PowerPoint を裏で起動します。
+PowerPoint の一時コピーを開いて描画するため、元のファイルや作業中の PowerPoint は変更しません。
+画像と AI の結果は、Markdown と同じフォルダの `img/<ファイル名>/` に保存されます。
+Markdown を移動・共有するときは、`img/` も一緒に扱ってください。
 
-`--refresh` は同じ入力でも AI を再実行するため、再度費用・利用枠を消費する場合があります。
-手編集の保護を解除するオプションではありません。
-生成に失敗した場合は以前のノートを残し、失敗した実行のフォルダへ取得済みの根拠・診断情報を保存します。
-未完了の実行結果は自動再利用しません。
+生成した説明には AI の解釈が含まれます。
+小さな文字や矢印の接続先は誤読される場合があるため、重要な箇所は元のスライドと見比べてください。
 
-## 既定の設定を変える
+### 3.3. 書き出し直す・フォルダをまとめて書き出す
 
-通常の抽出には設定ファイルは不要です。
-必要な場合だけ、次の操作で設定を作成・確認します。
+既存の Markdown は、既定では上書きしません。
+同じ出力先に書き出し直す場合は `--force` を指定します。
+`--context` を付けて書き出し直すと、内容の変わっていないスライドの説明は再利用します。
+
+```shell
+tkn-powerpoint-note export "C:\path\to\deck.pptx" --context --force
+```
+
+フォルダを指定すると、サブフォルダを含むすべての `.pptx` / `.pptm` を書き出します。
+フォルダを指定した場合、`--output` は使えません。
+一部のファイルで失敗しても、ほかのファイルの出力は保存し、失敗したファイルを結果の `results` に `export-error` として報告します。
+
+## 4. フォルダを継続的に取り込む
+
+取り込みでは、設定ファイルに登録した source ごとに、PowerPoint と代理ノートを対応付けて管理します。
+`pull` は、実行したときに一度だけ処理します。
+定期的に取り込む場合は、タスクスケジューラーなどから `pull` を実行します。
+
+### 4.1. 設定ファイルを作る
 
 ```shell
 tkn-powerpoint-note config init
-tkn-powerpoint-note config list
 ```
 
-`config list` は `config.generation.max_slides=10` のように1項目ずつ改行して表示します。
-Windows パスは `\` を重ねず表示します。JSON が必要な場合は `config list --json` を使えます。
-
-保存先は `~/.tkn/powerpoint_note/config.yaml` です。
-編集済みの設定ファイルは上書きしません。
-優先順位は、組み込み既定値 → ユーザー設定 → `./.tkn/config.yaml` → `--config FILE` → 個別 CLI オプションです。
-相対パスは実行時の作業フォルダを基準にします。
-
-設定ファイルには `schema_version: "3.0.0"` を指定します。共通の `generation.genai_profile`／`prompt_profile` も使えます。
-ノートの言語はプロファイルで選びます。組み込みは `default-ja`（既定・日本語）と `default-en`（英語）の2種類です。
-接続先は `genai_profiles` に名前を付けて定義します。組み込みは `codex-default`・`claude-default`・`copilot-default`・`antigravity-default` です。
-CLI の接続先は既存のログイン状態を使うため、トークンやパスワードは設定ファイルに書きません。
+`~/.tkn/powerpoint_note/config.yaml` が作成され、そのパスが結果の `configPath` に表示されます。
+作成したファイルの `sources` を、自分の入力フォルダとノート保存先に書き換えます。
+次の例では、source の ID を `library` にしています。
 
 ```yaml
-schema_version: "3.0.0"
-
-genai_profiles:
-  codex-default:
-    provider: codex
-    model: null
-  claude-default:
-    provider: claude-code
-    model: null
-
-generation:
-  default_generator: my-codex-def
-  generators:
-    my-codex-def:
-      genai_profile: codex-default
-      prompt_profile: default-ja
-      overrides: {}
-    my-codex-en:
-      genai_profile: claude-default
-      prompt_profile: default-en
+sources:
+  library:
+    presentations:
+      dir: 'C:\path\to\presentations'
+      recursive: true
+    notes:
+      dir: 'C:\path\to\notes'
+      frontmatter_term_format: plain
 ```
 
-通常は `default_generator` を使い、一度だけ切り替える場合は `--generator` を指定します。
+| 設定キー | 意味 |
+| --- | --- |
+| `presentations.dir` | 入力する PowerPoint のフォルダです。 |
+| `presentations.recursive` | `true` でサブフォルダも対象にし、フォルダ構成をノート側にも再現します。 |
+| `notes.dir` | 代理ノートを保存するフォルダです。Obsidian の Vault 内のフォルダを指定できます。 |
+| `notes.frontmatter_term_format` | `plain` で `keywords` と `categories` を通常の文字列に、既定の `obsidian-link` で `[[...]]` のリンクにします。 |
+
+編集後、読み込まれた設定を `tkn-powerpoint-note config list` で確認します。
+ほかの設定キーと、設定ファイルの優先順位は「[設定リファレンス](docs/reference/configuration.md)」を参照してください。
+
+### 4.2. 取り込む
+
+`status` で作成・更新されるノートを確認してから、`pull` を実行します。
+`status` はファイルを書き込みません。
 
 ```shell
-tkn-powerpoint-note export "C:\path\to\deck.pptx" --generator my-codex-en --context
-tkn-powerpoint-note config list --generator my-codex-en
+tkn-powerpoint-note status --source library
+tkn-powerpoint-note pull --source library
 ```
 
-個別の `--genai-profile`／`--prompt-profile` は選択したgeneratorより優先します。
-`genai_profiles` にない接続先は `--context` の実行前にエラーとなり、別の接続先へ切り替えません。
-`overrides` にはモデル・推論強度・タイムアウトなどを指定できます。
-スライド数や画像幅の設定は、引き続き `generation.max_slides`／`image_width` に置きます。
-通常の抽出でもプロファイルの表示文言とテンプレートを使います。原文の翻訳は行いません。
+`notes.dir` に、PowerPoint ごとの代理ノート `<ファイル名>.md` が作成されます。
+PowerPoint を保存した後に同じ `pull` を実行すると、変わったノートだけを更新します。
+代理ノートの Frontmatter と本文の形式は「[ノートの形式](docs/reference/note-format.md)」を参照してください。
 
-旧 `2.0.x`／`2.1.x` 設定を使っている場合は `schema_version` を `"3.0.0"` に変更し、
-`bridge_profile` を `genai_profile` に改名してください。Bridge の設定で使っていた接続先は、同じ名前で `genai_profiles` に定義します。
-旧 `--bridge-profile` は `--genai-profile` に置き換わります。
-旧 `1.0.x` 設定の場合は、さらに `generation.language: ja`／`en` を `generation.prompt_profile: default-ja`／`default-en` に置き換え、旧 `--language` を `--prompt-profile` に置き換えてください。
-設定ファイルの自動書き換えは行いません。
-不正な版、未知のキー、型の誤りは処理前にエラーにします。
-既定値と変更の影響は [設定リファレンス](docs/reference/configuration.md) にまとめています。
+source 内の1ファイルだけを取り込む場合は、ファイル名を指定します。
+登録済みのすべての source を取り込む場合は、`--all-sources` を使います。
 
-## コマンドを選ぶ
+```shell
+tkn-powerpoint-note pull --source library "deck.pptx"
+tkn-powerpoint-note pull --all-sources
+```
 
-| 目的 | コマンド |
+### 4.3. AI の説明を付ける・更新する
+
+`--context` を付けると、説明のないスライドと、内容の変わったスライドだけを AI で解析します。
+送信する情報と呼び出し回数の考え方は「[AI による説明を付ける](#32-ai-による説明を付ける)」と同じです。
+
+```shell
+tkn-powerpoint-note pull --source library --context --dry-run
+tkn-powerpoint-note pull --source library "deck.pptx" --context --slides "1-10"
+```
+
+スライドの挿入・並べ替え・削除や、内容を変えずに保存し直しただけでは、既存の説明を再利用します。
+途中で失敗した場合は、同じコマンドを再実行すると、済んだスライドを再利用して残りから続けます。
+
+`--context` を付けずに `pull` を実行すると、既存の説明はそのまま残します。
+説明の生成後にスライドの内容が変わっていれば、Frontmatter の `contextStatus` を `stale` にし、そのスライドの説明の上に注意書きを付けます。
+
+| `contextStatus` | 意味 |
 | --- | --- |
-| 選択スライド・セクション・図形数を確認する | `inspect FILE` |
-| 1 ファイルからノートを作成・更新する | `export FILE` |
-| 生成本文・根拠・原本のハッシュを検証する | `verify NOTE` |
-| 編集済み設定を保護して初期設定を作る | `config init` |
-| 有効な設定と、その値を決めた設定元を確認する | `config list` |
+| `not-generated` | 説明をまだ生成していません。 |
+| `current` | ノートにあるすべてのスライドの説明が、保存済みの PowerPoint と対応しています。人が内容を確認したという意味ではありません。 |
+| `partial` | 説明を生成していないスライドがあります。 |
+| `stale` | 説明の生成後に内容が変わったスライドがあります。`--context` を付けて `pull` すると更新します。 |
 
-0.3.0 ではコマンド名を `build` から `export` に変更しました。旧版の `build FILE` は `export FILE` に置き換えてください。
+しくみと上限の詳細は「[AI によるスライドの説明と資料の要約](docs/guides/slide-context.md)」を参照してください。
 
-詳細は `COMMAND --help` で確認できます。
-`--quiet` は進捗を省略し、`--verbose` は診断情報を追加します。同時指定はできません。
-利用者に関わる変更は [CHANGELOG](CHANGELOG.md) に記録します。
+### 4.4. 手書きの部分と手直しの保護
 
-## 開発と検証
+代理ノートの本文のうち、ツールが管理する範囲は `<!-- powerpoint-note:begin -->` と `<!-- powerpoint-note:end -->` のマーカーで囲まれています。
+マーカーの外に書いた文章と、ツールが知らない Frontmatter 項目は保持します。
+`title`・`author` などの文書プロパティは、`pull` のたびに PowerPoint の値で更新します。
+
+マーカーの中を手で直したノートは、`pull` で上書きせず、結果に `protected` として報告します。
+
+> [!WARNING]
+> `--force` は、手直しされたノートを `~/.tkn/powerpoint_note/state/backups/` に控えてから、マーカーの中を置き換えます。
+> マーカーの外の文章は保持します。
+
+`pull` は、PowerPoint と代理ノートを削除しません。
+元の PowerPoint が見つからない代理ノートは、結果に `missing-source` として報告し、ノートはそのまま残します。
+PowerPoint の名前を変えた場合は、新しい名前のノートを作り、前のノートを `missing-source` として報告します。
+
+## 5. コマンド一覧
+
+| 目的 | コマンド | 詳細 |
+| --- | --- | --- |
+| PowerPoint またはフォルダを Markdown に書き出す | `export <ファイルまたはフォルダ> [--context]` | [1つの PowerPoint を Markdown にする](#3-1つの-powerpoint-を-markdown-にする) |
+| PowerPoint の更新を代理ノートへ取り込む | `pull (--source <id> または --all-sources) [<ファイル>] [--context]` | [取り込む](#42-取り込む) |
+| 取り込みで変わるノートを確認する（変更なし） | `status --source <id>` | [取り込む](#42-取り込む) |
+| スライドの番号・タイトル・セクションを一覧する | `presentation list-slides --presentation <パス>` | [AI による説明を付ける](#32-ai-による説明を付ける) |
+| 設定ファイルを作成・確認する | `config init` / `config list` | [設定リファレンス](docs/reference/configuration.md) |
+
+次のオプションは、どのコマンドでも、コマンドの前後のどちらにも指定できます。
+
+| オプション | 動作 |
+| --- | --- |
+| `--config <パス>` | 指定した設定ファイルを、ほかの設定ファイルより優先して読み込みます。 |
+| `--json` | 結果を1つの JSON で表示します。 |
+| `-v` / `--verbose` | 診断情報をログに追加します。 |
+| `-q` / `--quiet` | 情報ログを表示しません。 |
+| `--no-color` | ログを色なしで表示します。 |
+
+## 6. 実行結果の読み方
+
+コマンドの結果は、標準出力に1行ごとの `key=value` で表示します。
+入れ子のキーは `.`、配列の要素は `[0]` のような番号でつなぎます。
+進捗・警告・診断は、常に標準エラーへ出力します。
+`--json` を付けると、標準出力を1つの JSON に切り替えます。
+端末・パイプ・リダイレクトのどれに出力しても、結果の形式は変わりません。
+
+```shell
+tkn-powerpoint-note pull --source library --dry-run
+tkn-powerpoint-note --json pull --source library --dry-run
+```
+
+| 終了コード | 意味 |
+| --- | --- |
+| `0` | 成功しました。 |
+| `1` | 一部またはすべての対象で、読み取り・生成・書き込みに失敗しました。手直しされたノートを保護した場合（`protected`）も含みます。 |
+| `2` | コマンドの引数に誤りがあります。 |
+| `3` | 設定ファイルや対象の指定に誤りがあります。 |
+| `130` | 中断しました。完了したノートと、保存済みの AI の結果は残ります。 |
+
+出力の項目と対象ごとの状態は「[CLI 出力契約](docs/reference/cli-output.md)」を参照してください。
+
+## 7. 保存場所
+
+| 保存場所 | 内容 | 失った場合の影響 |
+| --- | --- | --- |
+| `~/.tkn/powerpoint_note/config.yaml` | 設定ファイル | 入力フォルダと保存先の指定を作り直す必要があります。 |
+| `notes.dir`（source ごと） | 代理ノート | 手書きの本文を失います。生成部分は `pull` で作り直せます。 |
+| `notes.dir` の `img/<ファイル名>/` | スライドの画像、AI の結果、ノートの状態の記録（`state.json`） | 説明を再利用できなくなり、次の `--context` で生成し直します。手直しの有無は、ノートを作り直した内容と比べて確かめます。 |
+| `~/.tkn/powerpoint_note/state/backups/` | `--force` で置き換える前のノート | 置き換え前の内容に戻せなくなります。 |
+
+`export` は、Markdown を元ファイルの隣（または `--output`）に保存し、`--context` を付けたときだけ、その隣に `img/` を作ります。
+ノートと `img/` には、元ファイルのパスや抽出した本文が含まれます。
+公開するリポジトリなどに含めないよう注意してください。
+
+## 8. 対応範囲と制限
+
+- 入力は `.pptx` と `.pptm` です。旧形式の `.ppt`、暗号化されたファイル、Strict OOXML は読めません。PowerPoint で `.pptx` に保存し直してください。
+- 保存済みの内容だけを読み取ります。PowerPoint で開いたまま保存していない編集は対象外です。
+- `--context` の画像化は、マクロや ActiveX を含むファイルと、ハイパーリンク以外の外部参照（リンクした画像・動画・Excel のグラフなど）を含むファイルを拒否します。文字の抽出はできます。
+- グラフは保存されている値を使います。リンク元のブックの最新の値とは違う場合があります。
+- 画像の中の文字、動画、アニメーション、OLE オブジェクトの中身は抽出しません。マスターとレイアウトだけにある図は、画像には写りますが、文字としては抽出しません。
+- 図形の位置から、作成者の意図した読む順は決められません。抽出した文字は、上から下、左から右の順に並べます。
+- 文書プロパティとノートの Frontmatter の同期（`push`）、ファイルの名前変更の追跡、カード表示用の画像（`cover`）の作成は、実装していません。
+- AI の説明は解釈を含みます。`contextStatus: current` は、説明と PowerPoint の対応を示すもので、内容の正確さを保証しません。
+
+## 9. 更新
+
+リポジトリを更新した後は、CLI を再インストールします。
 
 ```shell
 cd "C:\path\to\tkn_powerpoint_note"
+uv tool install . --reinstall
+tkn-powerpoint-note --version
+```
+
+バージョンごとの変更内容と必要な対応は [CHANGELOG.md](CHANGELOG.md) を参照してください。
+
+## 10. 開発と検証
+
+```shell
 uv sync --locked
 uv run pytest
 uv run ruff check .
+uv run ruff format --check .
 uv run mypy src
 uv build
 ```
 
-テストには小さな架空の OOXML と AI・Office の代替処理を使い、個人の資料を外部送信しません。
-プロンプト・JSONスキーマ・Markdownテンプレート・表示文言は
-[`context_profiles/default-ja`](src/powerpoint_note/context_profiles/default-ja/) と
-[`context_profiles/default-en`](src/powerpoint_note/context_profiles/default-en/) にまとめています。
-言語もテンプレートのメタデータから取得し、Python内では切り替えません。
-完全な外部プロファイルの配置方法とファイル構成は [設定リファレンス](docs/reference/configuration.md#content-profiles) を参照してください。
-Office による画像化は Windows 専用です。
-文字抽出は移植可能な構成ですが、実動作の確認環境は Windows です。
-ソースや同梱リソースを更新した後は、`uv tool install . --reinstall` で再インストールしてください。
+テストには小さな架空の PowerPoint と、AI・PowerPoint の代替処理を使い、個人の資料を外部へ送信しません。
+Python パッケージ名は `powerpoint_note` です。
+主な実装の入口は次のとおりです。
+
+| ファイル | 担当 |
+| --- | --- |
+| [cli.py](src/powerpoint_note/cli.py) | コマンドと引数の定義、終了コード |
+| [pipeline.py](src/powerpoint_note/pipeline.py) | `export` / `pull` の流れ、スライド単位の再利用の計画 |
+| [extract.py](src/powerpoint_note/extract.py) | PowerPoint のファイルの読み取り |
+| [evidence.py](src/powerpoint_note/evidence.py) | AI に送る根拠データと、再利用の鍵 |
+| [context.py](src/powerpoint_note/context.py) | GenAI Bridge の呼び出しと記録 |
+| [render.py](src/powerpoint_note/render.py) | PowerPoint によるスライドの画像化 |
+| [markdown.py](src/powerpoint_note/markdown.py) | ノートの本文の組み立て |
+| [context_profiles/](src/powerpoint_note/context_profiles/) | 文章の profile（プロンプト・出力スキーマ・テンプレート） |
+
+## 11. 関連ドキュメント
+
+| 文書 | 読む目的 |
+| --- | --- |
+| [AI によるスライドの説明と資料の要約](docs/guides/slide-context.md) | 説明の再利用のしくみ、上限、失敗したときの対処、独自の文章 profile の作成 |
+| [設定リファレンス](docs/reference/configuration.md) | すべての設定キー、既定値、設定ファイルの優先順位 |
+| [ノートの形式](docs/reference/note-format.md) | Frontmatter の項目、本文の構成、Presentation Map の各列の意味 |
+| [CLI 出力契約](docs/reference/cli-output.md) | 結果の項目、対象ごとの状態、終了コード |
+| [変更履歴](CHANGELOG.md) | バージョンごとの変更点 |
+| [ライセンス](LICENSE) | 利用許諾 |

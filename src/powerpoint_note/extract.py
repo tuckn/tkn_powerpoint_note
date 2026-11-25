@@ -9,13 +9,13 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
-from xml.etree.ElementTree import Element
+from xml.etree.ElementTree import Element, tostring
 from zipfile import BadZipFile, ZipFile
 
 from defusedxml.ElementTree import fromstring
 
 from .io import digest
-from .models import Deck, NoteError, Shape, Slide
+from .models import ConfigError, Deck, NoteError, Shape, Slide
 
 NS = {
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
@@ -27,6 +27,16 @@ RID = "{" + NS["r"] + "}id"
 Matrix = tuple[float, float, float, float, float, float]
 IDENTITY: Matrix = (1, 0, 0, 1, 0, 0)
 FALSE = {"0", "false", "off"}
+SLIDE_NUMBER = "‹#›"
+# Master placeholders are matched by role; content placeholders inherit from the body.
+MASTER_ROLES = {"title": "title", "ctrTitle": "title", "dt": "dt", "ftr": "ftr", "sldNum": "sldNum"}
+SUFFIXES = {".pptx", ".pptm"}
+CONNECTOR_ENDS = {
+    "stCxn": ("from", "id"),
+    "endCxn": ("to", "id"),
+    "headEnd": ("start_arrow", "type"),
+    "tailEnd": ("end_arrow", "type"),
+}
 
 
 def local(tag: str) -> str:
@@ -43,6 +53,8 @@ class Package:
             raise NoteError("Uncompressed presentation exceeds extraction.max_uncompressed_mb")
         self.names = set(self.zip.namelist())
         self.cache: dict[str, Element] = {}
+        self.digests: dict[str, str] = {}
+        self.trees: dict[str, str] = {}
 
     def content_fingerprint(self) -> str:
         """Hash package content without ZIP bookkeeping or document properties."""
@@ -56,6 +68,49 @@ class Package:
             result.update(self.zip.read(name))
             result.update(b"\0")
         return result.hexdigest()
+
+    def part_digest(self, name: str) -> str:
+        """Hash one part, ignoring the page number PowerPoint rewrites when slides move."""
+        if name not in self.digests:
+            data = self.zip.read(name)
+            if b"slidenum" in data and name.endswith(".xml"):
+                root = fromstring(data)
+                for field in root.iter("{" + NS["a"] + "}fld"):
+                    if field.get("type") == "slidenum":
+                        for text in field.iter("{" + NS["a"] + "}t"):
+                            text.text = ""
+                data = tostring(root)
+            self.digests[name] = digest(data)
+        return self.digests[name]
+
+    def slide_fingerprint(self, part: str) -> str:
+        """Hash a slide with everything it draws: layout, master, theme, media, charts, notes.
+
+        Part names are left out: PowerPoint renumbers `slideN.xml` and `notesSlideN.xml`
+        when slides are inserted, moved or deleted, while their contents stay the same.
+        """
+        return self._tree_digest(part, ())
+
+    def _tree_digest(self, part: str, trail: tuple[str, ...]) -> str:
+        if part in self.trees:
+            return self.trees[part]
+        if part in trail or part not in self.names:
+            return ""
+        result = hashlib.sha256(self.part_digest(part).encode())
+        kind = posixpath.basename(posixpath.dirname(part))
+        for identifier, rel in sorted(self.rels(part).items()):
+            if rel["type"] in {"slide", "notesMaster"}:
+                continue  # back references and the notes page design
+            if kind == "slideMasters" and rel["type"] == "slideLayout":
+                continue  # sibling layouts do not draw this slide
+            child = (
+                "external:" + rel["target"]
+                if rel["external"] == "True"
+                else self._tree_digest(rel["target"], (*trail, part))
+            )
+            result.update(f"|{identifier}|{rel['type']}|{child}".encode())
+        self.trees[part] = result.hexdigest()
+        return self.trees[part]
 
     def xml(self, name: str) -> Element:
         if name not in self.names:
@@ -136,19 +191,19 @@ def orientation(xfrm: Element, x: float, y: float, w: float, h: float) -> Matrix
     return multiply((1, 0, 0, 1, cx, cy), multiply(rotate, (1, 0, 0, 1, -cx, -cy)))
 
 
-def bbox(xfrm: Element | None, transform: Matrix) -> list[float] | None:
+def bbox(xfrm: Element | None, transform: Matrix) -> list[int] | None:
     if xfrm is None:
         return None
     x, y = values(xfrm, "off", ("x", "y"))
     w, h = values(xfrm, "ext", ("cx", "cy"))
     m = multiply(transform, orientation(xfrm, x, y, w, h))
     corners = [point(m, px, py) for px, py in ((x, y), (x + w, y), (x, y + h), (x + w, y + h))]
-    return [round(min(p[i] for p in corners), 3) for i in (0, 1)] + [
-        round(max(p[i] for p in corners), 3) for i in (0, 1)
+    return [round(min(p[i] for p in corners)) for i in (0, 1)] + [
+        round(max(p[i] for p in corners)) for i in (0, 1)
     ]
 
 
-def location(box: list[float] | None, width: int, height: int) -> str:
+def location(box: list[int] | None, width: int, height: int) -> str:
     if box is None:
         return "unknown"
     x0, y0, x1, y1 = box
@@ -169,11 +224,20 @@ def location(box: list[float] | None, width: int, height: int) -> str:
 def paragraphs(node: Element) -> list[dict[str, Any]]:
     result = []
     for p in node.findall(".//a:p", NS):
-        text = "".join(
-            e.text or "" if local(e.tag) == "t" else "\n"
-            for e in p.iter()
-            if local(e.tag) in {"t", "br"}
-        )
+        parts: list[str] = []
+        for child in p:
+            kind = local(child.tag)
+            if kind == "br":
+                parts.append("\n")
+            elif kind == "fld" and child.get("type") == "slidenum":
+                parts.append(SLIDE_NUMBER)
+            else:
+                parts.extend(
+                    e.text or "" if local(e.tag) == "t" else "\n"
+                    for e in child.iter()
+                    if local(e.tag) in {"t", "br"}
+                )
+        text = "".join(parts)
         if not text.strip():
             continue
         props = p.find("a:pPr", NS)
@@ -187,46 +251,86 @@ def placeholder(node: Element) -> Element | None:
     return node.find(".//p:nvPr/p:ph", NS)
 
 
-def inherited_transform(node: Element, layouts: list[Element]) -> Element | None:
+def own_transform(node: Element) -> Element | None:
     own = node.find("p:spPr/a:xfrm", NS)
-    if own is None:
-        own = node.find("p:xfrm", NS)
+    return own if own is not None else node.find("p:xfrm", NS)
+
+
+def placeholders(root: Element | None) -> list[tuple[Element, Element]]:
+    if root is None:
+        return []
+    found = []
+    for candidate in root.iter():
+        if local(candidate.tag) in {"sp", "pic", "graphicFrame"}:
+            ph = placeholder(candidate)
+            if ph is not None:
+                found.append((candidate, ph))
+    return found
+
+
+def inherited_transform(
+    node: Element, layout: Element | None, master: Element | None
+) -> Element | None:
+    """Resolve slide -> layout (by idx, then type) -> master (by the layout's role)."""
+    own = own_transform(node)
     if own is not None:
         return own
     ph = placeholder(node)
     if ph is None:
         return None
-    for layout in layouts:
-        candidates = layout.findall(".//p:sp", NS)
-        for candidate in candidates:
-            other = placeholder(candidate)
-            if other is None:
-                continue
-            same = (
-                other.get("idx", "0") == ph.get("idx", "0")
-                if local(layout.tag) == "sldLayout"
-                else other.get("type", "obj") == ph.get("type", "obj")
-            )
-            if same:
-                found = candidate.find("p:spPr/a:xfrm", NS)
-                if found is not None:
-                    return found
+    role = ph.get("type", "obj")
+    candidates = placeholders(layout)
+    match = None
+    if ph.get("idx") is not None:
+        match = next((c for c in candidates if c[1].get("idx") == ph.get("idx")), None)
+    if match is None:
+        match = next((c for c in candidates if c[1].get("type", "obj") == role), None)
+    if match is not None:
+        found = own_transform(match[0])
+        if found is not None:
+            return found
+        role = match[1].get("type", role)
+    wanted = MASTER_ROLES.get(role, "body")
+    for candidate, other in placeholders(master):
+        if MASTER_ROLES.get(other.get("type", "obj"), "body") == wanted:
+            found = own_transform(candidate)
+            if found is not None:
+                return found
     return None
+
+
+CHART_FIELDS = {
+    "tx": "name",
+    "cat": "categories",
+    "val": "values",
+    "xVal": "x",
+    "yVal": "y",
+    "bubbleSize": "size",
+}
 
 
 def chart_data(pkg: Package, target: str) -> dict[str, Any]:
     chart = pkg.xml(target)
+    plot = chart.find(".//c:plotArea", NS)
+    kinds = (
+        [local(e.tag) for e in plot if local(e.tag).endswith("Chart")] if plot is not None else []
+    )
     series = []
     for ser in chart.findall(".//c:ser", NS):
         item: dict[str, Any] = {}
-        for key in ("tx", "cat", "val", "xVal", "yVal", "bubbleSize"):
+        for key, label in CHART_FIELDS.items():
             child = ser.find("c:" + key, NS)
             if child is not None:
-                item[key] = [e.text or "" for e in child.iter() if local(e.tag) == "v"]
+                found = [e.text or "" for e in child.iter() if local(e.tag) == "v"]
+                item[label] = "\n".join(found) if key == "tx" else found
         series.append(item)
+    title = chart.find("c:chart/c:title", NS)
     return {
+        "type": ", ".join(dict.fromkeys(kinds)),
+        "title": "".join(e.text or "" for e in title.iter() if local(e.tag) == "t")
+        if title is not None
+        else "",
         "series": series,
-        "title": "\n".join(e.text or "" for e in chart.findall(".//c:title//a:t", NS)),
         "data_source": "cached chart values",
     }
 
@@ -237,7 +341,8 @@ def read_shapes(
     part: str,
     width: int,
     height: int,
-    layouts: list[Element],
+    layout: Element | None,
+    master: Element | None,
 ) -> list[Shape]:
     rels = pkg.rels(part)
     result: list[Shape] = []
@@ -274,7 +379,7 @@ def read_shapes(
                 walk(node, m, groups + [shape_id])
                 continue
             ph = placeholder(node)
-            box = bbox(inherited_transform(node, layouts), transform)
+            box = bbox(inherited_transform(node, layout, master), transform)
             shape = Shape(
                 id=shape_id,
                 kind=kind,
@@ -313,17 +418,24 @@ def read_shapes(
                     for j, cell in enumerate(row.findall("a:tc", NS), 1)
                     if any(k in cell.attrib for k in {"gridSpan", "rowSpan", "hMerge", "vMerge"})
                 ]
-            shape.details["colors"] = [
-                {"kind": local(e.tag), "value": e.get("val", e.get("lastClr", ""))}
-                for e in node.iter()
-                if local(e.tag) in {"srgbClr", "schemeClr", "sysClr"}
-            ]
-            if kind == "cxnSp":
-                shape.details["connections"] = [
-                    {"end": local(e.tag), **e.attrib}
+            colors = list(
+                dict.fromkeys(
+                    e.get("val", "")
+                    if local(e.tag) == "schemeClr"
+                    else "#" + e.get("val", e.get("lastClr", ""))
                     for e in node.iter()
-                    if local(e.tag) in {"stCxn", "endCxn", "headEnd", "tailEnd"}
-                ]
+                    if local(e.tag) in {"srgbClr", "schemeClr", "sysClr"}
+                )
+            )
+            if colors:
+                shape.details["colors"] = colors
+            if kind == "cxnSp":
+                ends = {local(e.tag): e for e in node.iter() if local(e.tag) in CONNECTOR_ENDS}
+                shape.details["connection"] = {
+                    label: ends[tag].get(attribute, "")
+                    for tag, (label, attribute) in CONNECTOR_ENDS.items()
+                    if tag in ends and ends[tag].get(attribute, "") not in ("", "none")
+                }
             links = []
             for e in node.iter():
                 for key, value in e.attrib.items():
@@ -365,38 +477,60 @@ def read_notes(pkg: Package, part: str) -> str:
     return "\n".join(blocks).strip()
 
 
+def comment_text(node: Element) -> str:
+    """Text of one comment or reply, without the replies nested below it."""
+    found: list[str] = []
+
+    def walk(element: Element) -> None:
+        for child in element:
+            kind = local(child.tag)
+            if kind in {"replyLst", "reply"}:
+                continue
+            if kind in {"text", "t"}:
+                found.append(child.text or "")
+            walk(child)
+
+    walk(node)
+    return "\n".join(found).strip()
+
+
 def read_comments(pkg: Package, part: str, authors: dict[str, str]) -> list[dict[str, Any]]:
     result = []
     for rel in pkg.rels(part).values():
         if "comment" not in rel["type"].lower() or rel["external"] == "True":
             continue
         root = pkg.xml(rel["target"])
+        parents = {child: parent for parent in root.iter() for child in parent}
         for node in root.iter():
-            if local(node.tag) not in {"cm", "comment"}:
+            kind = local(node.tag)
+            if kind not in {"cm", "comment", "reply"}:
                 continue
-            text = "\n".join(
-                e.text or "" for e in node.iter() if local(e.tag) in {"text", "t"}
-            ).strip()
-            if text:
-                result.append(
-                    {
-                        "author": authors.get(node.get("authorId", ""), node.get("authorId", "")),
-                        "created": node.get("dt", node.get("created", "")),
-                        "text": text,
-                        "resolved": node.get("resolved"),
-                        "id": node.get("id", node.get("idx", "")),
-                    }
-                )
+            text = comment_text(node)
+            if not text:
+                continue
+            item = {
+                "author": authors.get(node.get("authorId", ""), node.get("authorId", "")),
+                "created": node.get("dt", node.get("created", "")),
+                "text": text,
+                "resolved": node.get("resolved"),
+                "id": node.get("id", node.get("idx", "")),
+            }
+            if kind == "reply":
+                parent = parents.get(node)
+                while parent is not None and local(parent.tag) not in {"cm", "comment"}:
+                    parent = parents.get(parent)
+                item["reply_to"] = parent.get("id", "") if parent is not None else ""
+            result.append(item)
     return result
 
 
 def read_deck(path: Path, settings: dict[str, Any]) -> Deck:
-    if path.suffix.lower() != ".pptx":
-        raise NoteError(
-            "Input must be a .pptx file; convert legacy .ppt/.pptm files in PowerPoint first"
+    if path.suffix.lower() not in SUFFIXES:
+        raise ConfigError(
+            "Input must be a .pptx or .pptm file; convert legacy .ppt files in PowerPoint first"
         )
     if not path.is_file():
-        raise NoteError(f"Input file does not exist: {path}")
+        raise ConfigError(f"Input file does not exist: {path}")
     limit = settings["max_file_mb"] * 1024 * 1024
     if path.stat().st_size > limit:
         raise NoteError("Presentation exceeds extraction.max_file_mb")
@@ -456,9 +590,10 @@ def read_deck(path: Path, settings: dict[str, Any]) -> Deck:
             seen.add(sid.get("id", ""))
             part = rel["target"]
             xml = pkg.xml(part)
-            layouts = [pkg.xml(t) for t in pkg.related(part, "slideLayout")]
-            for target in pkg.related(part, "slideLayout"):
-                layouts.extend(pkg.xml(t) for t in pkg.related(target, "slideMaster"))
+            layout_parts = pkg.related(part, "slideLayout")
+            master_parts = pkg.related(layout_parts[0], "slideMaster") if layout_parts else []
+            layout = pkg.xml(layout_parts[0]) if layout_parts else None
+            master = pkg.xml(master_parts[0]) if master_parts else None
             slide = Slide(
                 number,
                 sid.get("id", ""),
@@ -467,7 +602,8 @@ def read_deck(path: Path, settings: dict[str, Any]) -> Deck:
                 int(root.get("firstSlideNum", "1")) + number - 1,
                 sections.get(sid.get("id", "")),
             )
-            slide.shapes = read_shapes(pkg, xml, part, width, height, layouts)
+            slide.shapes = read_shapes(pkg, xml, part, width, height, layout, master)
+            slide.fingerprint = pkg.slide_fingerprint(part)
             slide.title = next(
                 (
                     s.text

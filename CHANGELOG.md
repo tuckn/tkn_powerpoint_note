@@ -2,61 +2,109 @@
 
 ## Unreleased
 
-- Update GenAI Bridge to 27ac8e4. Claude Code calls no longer add an empty folder under `~/.claude/projects` for every call, and when a forced termination leaves a temporary folder behind (it may hold copies of the input images), the first generation of the next run removes it. Folders left by the earlier Bridge version are not removed.
-- Breaking: define AI connections in this application's configuration under top-level `genai_profiles` (config schema 3.0.0) and pass the validated profile directly to GenAI Bridge `Runtime`. `~/.tkn/genai_bridge/config.yaml` and other Bridge configuration files are never read, so installing this CLI is enough. Built-in connections are `codex-default`, `claude-default`, `copilot-default` and `antigravity-default`; layers merge by name and field, and a relative `cli.executable` resolves from the file that sets it.
-- Rename `generation.bridge_profile` / `generation.generators.<id>.bridge_profile` to `genai_profile` and `--bridge-profile` to `--genai-profile`. Config 2.0.x/2.1.x files and the old keys fail with migration instructions; a connection missing from `genai_profiles` fails before rendering or AI calls instead of falling back. Existing AI analyses stay reusable because context keys keep the 2.x field name.
-- Write the proxy-note `type` as the unquoted proper noun `PowerPoint` and raise the note schema to 4.0.0 (breaking for filters on `type: powerpoint`). Notes with schemas 1.0.0–3.0.0 stay readable and are rewritten on the next export without new AI calls; update external scripts or Bases that filter on `type: powerpoint`.
-- Compact Frontmatter slide lists and body coverage into range strings such as `3-6` and `1-2,7-400` (note schema 3.0.0); keep evidence/CLI numeric arrays and read schemas 1.0.0/2.0.0/2.1.0.
-- Record AI provider, requested/returned models and Bridge-returned requested reasoning Effort from saved per-call records. Display `generator: codex (model)` and move application identity/version to `generatedBy`/`generatedByVersion`; preserve unknown and mixed-call values without guessing.
-- Update GenAI Bridge to the Effort-reporting revision and reuse verified legacy context across metadata-only/compatible Bridge reporting updates without new AI calls.
-- Extend the Excel-aligned flat Frontmatter with `sourceFileName`/`sourceFullPath` and context status, profiles, slide coverage, source fingerprint and generation time (note schema 2.1.0). Preserve the full-path `sourceFile` alias and legacy schema 1.0.0/2.0.0 reading.
-- Separate AI context reuse from Markdown build keys so schema, tool version and display-template updates reuse verified context without new VLM calls. Migrate matching legacy bundles without AI, preserve the original generation timestamp, and verify context provenance. `--refresh` still forces new calls.
-- 0.7.0 prints all CLI results as copyable `key=value` lines by default. `--json` selects structured output before or after nested commands and applies to errors and interruption. Result paths are separate from error messages; exit codes, saved artifacts, and dry-run behavior are unchanged.
-- Rename `config show` to `config list` and print copyable `key=value` lines by default, with unescaped Windows paths; add `--json` for structured output. Listing logs at INFO level.
-- Include GenAI Bridge and Windows-only pywin32 in standard dependencies, so `uv tool install .` also prepares `--context`. The separate `context` extra is removed; existing installations should use `uv tool install . --reinstall`. Desktop PowerPoint and AI connection settings are still required for visual context.
+0.7.0 からの作り直しです。
+設定・ノート・コマンド・保存先のすべてが変わり、以前の形式との互換はありません（非互換変更）。
+以前のノートと設定ファイルは読み込めないため、「移行」のとおりに作り直してください。
 
-## 0.6.0
+### 追加
 
-- Align PowerPoint Frontmatter with the Vault/Excel proxy-note layout: fixed common head/tail fields, comment-separated groups and flat Obsidian properties (note schema 2.0.0).
-- Replace legacy `date` with `created`, preserve note identity and user properties, normalize known timestamps to quoted JST seconds, and reject ambiguous dates before generation.
-- Add a blank line after Frontmatter and an H1 for new notes; retain legacy verification and compare flattened profile provenance against evidence.
-- Protect `reviewStatus: accepted` alongside `reviewed`. Existing notes change only on explicit export; schema changes invalidate the build cache.
+- フォルダの PowerPoint を代理ノートとして管理する `pull` と、変更予定だけを表示する `status` を追加。設定ファイルの `sources.<id>` に、入力フォルダ（`presentations.dir`）とノートの保存先（`notes.dir`）を書く。`pull` は `--source <id>` または `--all-sources` で実行し、ファイル名を付けると1つに限定できる。ノートと PowerPoint は削除しない。元の PowerPoint が見つからないノートは `missing-source` として報告する。
+- AI の説明を、スライド単位で再利用する。再利用の判定は、そのスライドと、スライドが使うレイアウト・マスター・テーマ・画像・ノートの内容、AI に送る根拠データ、プロンプト、出力スキーマ、接続先のモデルで行う。スライドの位置とファイル名は判定に含めないため、スライドの挿入・並べ替え・保存し直しでは、変わったスライドだけを生成し直す。
+- 途中で失敗した後に同じコマンドを実行すると、済んだスライドを再利用して、残りから続ける。
+- `--context` を付けない `pull` は、作成済みの説明を残す。生成後に内容が変わったスライドは `contextStatus: stale` と `contextStaleSlides` で示し、説明の上に注意書きを付ける。
+- `--slides`・`--section` で一部のスライドだけに説明を付けた場合も、以前に作った説明を残して積み重ねる。
+- 根拠データが `generation.limits.max_input_chars` を超えるスライドは、全体を止めずにそのスライドだけを飛ばす（結果の `skippedSlides`）。資料全体の要約が上限を超える場合は、要約だけを飛ばして `warnings` に示す。
+- `.pptm` の文字抽出に対応。マクロは実行しない。`--context` の画像化は、これまでどおりマクロを含むファイルを拒否する。
+- ノートの先頭に、全スライドのタイトル・セクション・表示状態・要素の数を並べた「Presentation Map」を追加。
+- `--no-color` を追加。
 
-0.4.0:
+### 変更
 
-- Add generation.default_generator, named generation.generators and --generator for export/config show.
-- Resolve individual CLI options after the selected generator, deep-merge layered definitions and report effective setting sources.
-- Add validated scalar GenAI Bridge overrides and record the selected generator in notes, evidence and usage.
-- Keep flat generation settings and config schema 2.0.x readable; new config examples use 2.1.0.
-- Exclude unselected generator definitions from output cache keys; keep edited/reviewed note protection.
+- AI に送る根拠データを短くした。空白のない JSON にし、色は図形ごとに重複を除き、位置はスライドに対する千分率の整数にし、図形名と空の項目を省いた。400枚の資料で、合計が約1,709万字から約209万字になり、上限（12万字）を超えるスライドが23枚から0枚になった。
+- 抽出した文字を、位置の順（上から下、左から右）に並べる。図形の内部名と ID の見出し、コネクタ、説明のない画像を本文から外した。PowerPoint が自動で付けた代替テキストと、ファイル名だけの代替テキストは出力しない。
+- 抽出した文字のエスケープをやめ、原文のまま出力する（`R&D`・`snake_case` など）。Markdown の構造を壊す箇所（行頭の `#`、`<tag`、表の `|`）だけを書き換える。
+- グラフを、種類・タイトルと、系列ごとの表で出力する。
+- コメントの返信を、返信した人と日時を付けて別の項目にする。
+- スライド番号のフィールドを `‹#›` として扱う。PowerPoint がスライドの挿入で書き換える番号で、内容が変わったとみなさないため。
+- コマンドと出力を `tkn-excel-note` に合わせた。
+  - `export` の出力先の既定を、元ファイルの隣の `<ファイル名>.md` に変更。フォルダを指定すると、中のすべての PowerPoint を書き出す。既存の Markdown は `--force` がなければ置き換えない。
+  - `inspect` を `presentation list-slides --presentation <パス>` に変更。
+  - `--prompt-profile` を `--profile` に変更。`--genai-profile` を廃止（接続先は generator で選ぶ）。
+  - `--slides`・`--section` は、`--context` で説明を付けるスライドを選ぶオプションになった。ノートには、常に表示中のすべてのスライドの抽出結果を書く。
+  - 結果のキーを `camelCase` に統一し、`status`・`command`・`statusCounts`・`results` の形にそろえた。
+  - 終了コードを、0＝成功、1＝処理の失敗（一部の失敗を含む）、2＝引数の誤り、3＝設定・対象の指定の誤り、130＝中断に変更。
+- 設定の形式を `"4.0.0"` に変更。`sources` を追加し、`selection` を廃止。非表示スライドとスライド外の要素の扱いは `extraction.include_hidden`・`extraction.off_slide` に移動。`generation.profile_dirs` を `generation.prompt_profile_dirs` に改名し、上限を `generation.limits`（`max_slides`・`max_input_chars`・`image_width`・`max_render_seconds`）にまとめた。
+- `generation.limits.max_slides` は、1回の実行で AI に送るスライドの数（1資料あたり）の上限になった。再利用するスライドは数えない。
+- 画像化の待ち時間の既定を 180 秒から 600 秒に変更（`generation.limits.max_render_seconds`）。
+- 代理ノートの Frontmatter を `tkn-excel-note` の並びに合わせ、`schemaVersion` を `"5.0.0"` にした。`sourceId`・`sourceRoot`・`contextStaleSlides` を追加し、検証用の項目（`sourceFile`・`sourceSha256`・`selectedSlides`・`context`・`generator`・`generation*`・`generatedBy*`・`promptProfile*`・`reviewStatus`・`evidencePath`・`buildKey`・`generatedSha256`）を廃止。`keywords`・`categories` は、既定で `[[...]]` のリンクにする（`notes.frontmatter_term_format`）。
+- `export` の Markdown は `type: PowerPointExport`・`schemaVersion: "1.0"` とし、管理マーカーを付けない。
+- AI の結果と画像の保存先を、ノートと同じフォルダの `img/<PowerPointのファイル名>/` に変更。ノートが参照しなくなった結果は、成功した実行の最後に削除する。
+- 文章の profile の版を 2.0 に変更。スライドの出力から `slide_number` を外し、テンプレートの項目と表示文言を入れ替えた。独自の profile は作り直しが必要。
 
-0.3.0:
+### 修正
 
-- Rename the public `build FILE` command to `export FILE`; use `export` in existing scripts. The old command is no longer accepted.
-- Keep export options, note updates, evidence reuse, dry-run and content protection unchanged.
+- 標準の「タイトルとコンテンツ」レイアウトで、本文のプレースホルダーの位置を取得できず「位置不明」の警告が出ていたのを修正。位置をスライド → レイアウト → マスターの順に、PowerPoint と同じ対応で探す。
+- AI の出力がスキーマに合わない場合に、原因が分からないまま終了コード 1 になっていたのを修正。合わない項目をメッセージに示し、返された出力を `rejected.json`、理由を `usage.json` に保存する。
+- 画像化に失敗したとき、PowerPoint 側のエラーの内容をメッセージと `--verbose` のログに出す。時間切れのとき、一時フォルダの削除の失敗で元のエラーが隠れないようにした。
+- グラフと SmartArt が、専用の欄と図形の一覧に二重に出力されていたのを修正。
 
-0.2.0:
+### 廃止
 
-- Move prompts, structured response schemas, Markdown templates and display labels into complete `default-ja` / `default-en` content profiles.
-- Replace `generation.language` and `--language` with `generation.prompt_profile` and `--prompt-profile`; the profile owns the language.
-- Add optional `generation.profile_dirs` to load complete curated external bundles.
-- Change the config schema to `2.0.0`; old `1.0.x` configs fail with explicit migration instructions and are never rewritten automatically.
-- Validate profile resources before processing, record provenance in outputs and invalidate caches when selected resources change.
-- Keep source extraction, opt-in AI calls and protection of handwritten/reviewed notes.
+- `verify` コマンドと、ノートごとの根拠フォルダ（`<ノート>.assets/<ハッシュ>/`、`evidence.json`・`body.md`・`manifest.json`）。手直しの検出は、ノートの隣の `img/<PowerPointのファイル名>/state.json` で行う。
+- `reviewStatus: reviewed`・`accepted` によるノートの保護。
+- 以前の形式の読み替え（ノートの schema 1.0.0〜4.0.0、設定の 1.0.x〜3.0.x、旧オプション `--bridge-profile`）。
 
-## 0.1.0
+### 移行
 
-Initial implementation:
+1. 設定ファイル `~/.tkn/powerpoint_note/config.yaml` を別名で退避し、`tkn-powerpoint-note config init` で作り直して、必要な値を書き写す。
+2. 以前の `export` で作ったノート（`~/.tkn/powerpoint_note/data/` の下や、`--output` で指定した場所）は、新しい版では更新できない。手書きの部分を退避してから、`pull` または `export` で作り直す。以前の `.assets` フォルダの AI の結果は再利用できない。
 
-- Build a source-backed Markdown note from one read-only PowerPoint file.
-- Extract slide text, tables, cached chart data, SmartArt text, notes, comments, document properties and geometry.
-- Select slides by 1-based page positions/ranges and exact section names.
-- Exclude hidden slides and fully off-slide objects by default, with explicit inclusion options.
-- Add optional visual context and a cited presentation summary through GenAI Bridge.
-- Bound context processing to the selected slides, with a default 10-slide guard.
-- Preserve handwritten note sections and unknown Frontmatter; protect reviewed/edited generated content.
-- Verify hashes and provenance, reuse unchanged results, and retain evidence when generation fails.
-- Provide layered settings, config init/show, dry-run, JSON results, and Japanese/English documentation.
-- No source catalog, pull/push synchronization or PowerPoint write-back.
+### そのほか
 
-- Send provider-compatible output schemas while retaining citation-uniqueness validation locally.
+- リポジトリのテキストファイルの改行コードを LF に統一し、`.gitattributes` を追加。
+- CHANGELOG を日本語にし、版ごとの見出しと日付を付けた。0.7.0 の後に `Unreleased` として記録していた変更（Frontmatter の平坦化、`genai_profiles`、`type: PowerPoint` など）は、公開した版がなく、この作り直しに含まれるため、上の内容にまとめた。
+
+## 0.7.0 - 2026-10-29
+
+- すべてのコマンドの結果を、既定で1行ごとの `key=value` で表示。`--json` で JSON に切り替える。`--json` はコマンドの前後のどちらにも指定でき、エラーと中断にも適用する。結果のパスはエラーメッセージと別の項目にした。
+
+## 0.6.0 - 2026-10-07
+
+- Frontmatter を Vault と Excel の代理ノートの並びに合わせた（先頭と末尾の共通項目、コメントで区切ったグループ、入れ子のない項目）。ノートの schema は 2.0.0。
+- `date` を `created` に置き換え、ノートの ID と利用者の項目を保持。日時を日本時間・秒単位・引用符付きにそろえ、あいまいな日時は生成の前にエラーにする。
+- Frontmatter の後に空行を入れ、新しいノートに H1 を付ける。
+- `reviewStatus: accepted` のノートも `reviewed` と同じく保護する。
+
+## 0.5.0 - 2026-10-04
+
+- `config show` を `config list` に改名し、既定で1行ごとの `key=value` を表示。`--json` で JSON に切り替える。
+- GenAI Bridge と Windows 用の pywin32 を標準の依存関係に含め、`uv tool install .` だけで `--context` の準備ができるようにした。
+
+## 0.4.0 - 2026-10-01
+
+- `generation.default_generator`、名前付きの `generation.generators`、`--generator` を追加。
+- 個別の CLI オプションを、選んだ generator の後に適用。重ねた設定を項目単位で合わせ、有効な値の設定元を表示する。
+- GenAI Bridge の値の上書き（`overrides`）を追加し、選んだ generator をノート・根拠・使用量の記録に残す。
+
+## 0.3.0 - 2026-10-01
+
+- コマンド `build FILE` を `export FILE` に改名。
+
+## 0.2.0 - 2026-10-01
+
+- プロンプト・出力スキーマ・Markdown テンプレート・表示文言を、文章の profile（`default-ja`・`default-en`）にまとめた。
+- `generation.language`・`--language` を `generation.prompt_profile`・`--prompt-profile` に置き換えた。
+- `generation.profile_dirs` で、外部の profile を読み込めるようにした。
+- AI に送る出力スキーマから、接続先が対応しない一意性の制約を外し、検証は手元で行う。
+
+## 0.1.0 - 2026-10-01
+
+最初の実装です。
+
+- 1つの PowerPoint から、原本を変更せずに Markdown ノートを作る。
+- スライドの文字、表、グラフの保存値、SmartArt の文字、発表者ノート、コメント、文書プロパティ、図形の位置を抽出する。
+- スライドを、1から数えた位置・範囲と、セクション名で選ぶ。
+- 非表示スライドと、完全にスライド外にある要素を既定で除外する。
+- GenAI Bridge を使い、スライド画像からの説明と、出典のスライド番号を付けた資料の要約を生成する（`--context`）。
+- 手書きの部分と、ツールが知らない Frontmatter の項目を保持する。
+- 重ねた設定、`config init`、`--dry-run`、JSON の結果を提供する。

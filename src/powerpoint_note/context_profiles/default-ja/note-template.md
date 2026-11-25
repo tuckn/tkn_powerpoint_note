@@ -1,11 +1,11 @@
-対象スライド: {{coverage}}
+## Presentation Map
 
-{{mode}}
-
-{{evidence}}
+{{map}}
 
 {{#overview}}
 {{overview}}
 {{/overview}}
+
+## スライド
 
 {{slides}}

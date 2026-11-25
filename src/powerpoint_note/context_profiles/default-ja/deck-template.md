@@ -1,8 +1,10 @@
-## 資料のcontext（AI生成）
+## 資料の要約（AI生成）
 
 {{summary}}
 
 {{#key_points}}
+### 要点
+
 {{key_points}}
 {{/key_points}}
 

@@ -1,4 +1,4 @@
-"""Flat, ordered Obsidian properties for PowerPoint proxy notes."""
+"""Flat, ordered Obsidian properties for PowerPoint proxy notes and exports."""
 
 from __future__ import annotations
 
@@ -9,58 +9,63 @@ from typing import Any
 import yaml
 
 from .models import NoteError
-from .selection import format_slides
 
-SCHEMA_VERSION = "4.0.0"
-# Schemas whose application identity is stored in generatedBy/generatedByVersion.
-GENERATED_BY_SCHEMAS = frozenset({"3.0.0", SCHEMA_VERSION})
-# Proper noun: keep the product capitalization. Schemas up to 3.0.0 used "powerpoint".
-NOTE_TYPE = "PowerPoint"
+PROXY_TYPE = "PowerPoint"
+PROXY_SCHEMA = "5.0.0"
+EXPORT_TYPE = "PowerPointExport"
+EXPORT_SCHEMA = "1.0"
 JST = timezone(timedelta(hours=9))
 HEAD = ("type", "schemaVersion", "title", "description", "cover")
 TAIL = ("tags", "created", "updated", "noteId")
+DOCUMENT = ("subject", "author", "keywords", "categories", "comments")
+CONTEXT = (
+    "contextStatus",
+    "contextProfiles",
+    "contextAnalyzedSlides",
+    "contextOmittedSlides",
+    "contextStaleSlides",
+    "contextSourceFingerprint",
+    "contextGeneratedAt",
+)
 GROUPS = (
-    ("Presentation metadata", ("subject", "author", "keywords", "categories", "comments")),
+    ("Presentation metadata", DOCUMENT),
     (
         "Source identity and location",
-        ("sourceFileName", "sourceFullPath", "sourceFile", "sourceSha256"),
+        ("sourceId", "sourceRoot", "sourceFileName", "sourceFullPath"),
     ),
     ("Source timestamps", ("sourceCreated", "sourceModified")),
-    ("Slide selection", ("selectedSlides", "context")),
-    (
-        "Context generation",
-        (
-            "contextStatus",
-            "contextProfiles",
-            "contextAnalyzedSlides",
-            "contextOmittedSlides",
-            "contextSourceFingerprint",
-            "contextGeneratedAt",
-        ),
-    ),
-    (
-        "Generation",
-        (
-            "generator",
-            "generationProvider",
-            "generationModel",
-            "generationResponseModel",
-            "generationReasoningEffort",
-            "generatedBy",
-            "generatedByVersion",
-            "generationGenerator",
-            "promptProfile",
-            "promptProfileVersion",
-            "promptProfileLanguage",
-            "promptProfileSha256",
-            "promptProfileResources",
-            "reviewStatus",
-        ),
-    ),
-    ("Evidence and verification", ("evidencePath", "buildKey", "generatedSha256")),
+    ("Context generation", CONTEXT),
+)
+EXPORT_ORDER = (
+    "type",
+    "schemaVersion",
+    "title",
+    *DOCUMENT,
+    "sourceFileName",
+    "sourceFullPath",
+    "sourceCreated",
+    "sourceModified",
+    "sourceSnapshotSha256",
+    "generatedAt",
+    "generationMethod",
+    *CONTEXT,
 )
 KNOWN = {*HEAD, *TAIL, *(key for _, keys in GROUPS for key in keys)}
-TIMESTAMPS = ("created", "updated", "sourceCreated", "sourceModified", "contextGeneratedAt")
+# Always double-quoted, whatever the value looks like.
+QUOTED = {
+    "schemaVersion",
+    "title",
+    "description",
+    "cover",
+    "sourceCreated",
+    "sourceModified",
+    "created",
+    "updated",
+    "generatedAt",
+    "contextGeneratedAt",
+    "contextSourceFingerprint",
+    "sourceSnapshotSha256",
+}
 
 
 class NoteLoader(yaml.SafeLoader):
@@ -83,29 +88,46 @@ NoteLoader.yaml_implicit_resolvers = {
 }
 
 
+class Quoted(str):
+    """A string written in double quotes regardless of its content."""
+
+
 class NoteDumper(yaml.SafeDumper):
     """Quote strings without changing their values or YAML types."""
 
 
 def _string(dumper: NoteDumper, value: str) -> yaml.ScalarNode:
     style = None
-    if re.match(r"^(?:[A-Za-z]:\\|\\\\)", value):
-        style = "'"
-    elif (
-        not value
-        or value.startswith("[[")
-        or re.match(r"^\d{4}-\d{2}-\d{2}(?:$|[T ])", value)
-        or re.fullmatch(r"\d+\.\d+\.\d+(?:[-+].*)?", value)
-        or any(
-            pattern.match(value)
-            for _, pattern in yaml.SafeLoader.yaml_implicit_resolvers.get(value[0], [])
-        )
+    if re.match(r"^(?:[A-Za-z]:\\|\\\\)", value) or (
+        "\\" in value and _needs_quotes(value) and "'" not in value
     ):
+        # Backslashes stay literal in single quotes.
+        style = "'"
+    elif _needs_quotes(value):
         style = '"'
     return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
 
 
+def _needs_quotes(value: str) -> bool:
+    return (
+        not value
+        or value.startswith("[[")
+        or bool(re.match(r"^\d{4}-\d{2}-\d{2}(?:$|[T ])", value))
+        or bool(re.fullmatch(r"\d+\.\d+(?:\.\d+)?(?:[-+].*)?", value))
+        or bool(re.fullmatch(r"[yYnN]|\d+[eE]\d+|0o[0-7]+", value))
+        or any(
+            pattern.match(value)
+            for _, pattern in yaml.SafeLoader.yaml_implicit_resolvers.get(value[0], [])
+        )
+    )
+
+
+def _quoted(dumper: NoteDumper, value: Quoted) -> yaml.ScalarNode:
+    return dumper.represent_scalar("tag:yaml.org,2002:str", str(value), style='"')
+
+
 NoteDumper.add_representer(str, _string)
+NoteDumper.add_representer(Quoted, _quoted)
 
 
 def now_iso() -> str:
@@ -113,6 +135,7 @@ def now_iso() -> str:
 
 
 def timestamp(value: Any, field: str) -> str:
+    """Japan time to the second; date-only values stay dates; no timezone is ever guessed."""
     if value in (None, ""):
         return ""
     if not isinstance(value, str):
@@ -128,91 +151,58 @@ def timestamp(value: Any, field: str) -> str:
     return parsed.astimezone(JST).isoformat(timespec="seconds")
 
 
-def profile_properties(provenance: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "promptProfile": provenance["name"],
-        "promptProfileVersion": provenance["version"],
-        "promptProfileLanguage": provenance["language"],
-        "promptProfileSha256": provenance["sha256"],
-        "promptProfileResources": [
-            f"{name}: {sha}" for name, sha in sorted(provenance["resources"].items())
-        ],
-    }
+def _terms(value: str, term_format: str) -> list[str]:
+    terms = [s.strip() for s in value.split(";") if s.strip()]
+    return [f"[[{term}]]" for term in terms] if term_format == "obsidian-link" else terms
 
 
-def source_properties(metadata: dict[str, Any]) -> dict[str, Any]:
+def source_properties(
+    metadata: dict[str, Any], fallback_title: str, term_format: str = "plain"
+) -> dict[str, Any]:
+    """Document properties of the presentation, as written in both note types."""
     core = metadata.get("core.xml", {})
     return {
-        "title": core.get("title", ""),
+        "title": core.get("title", "") or fallback_title,
         "subject": core.get("subject", ""),
         "author": core.get("creator", ""),
-        "keywords": [s.strip() for s in core.get("keywords", "").split(";") if s.strip()],
-        "categories": [s.strip() for s in core.get("category", "").split(";") if s.strip()],
+        "keywords": _terms(core.get("keywords", ""), term_format),
+        "categories": _terms(core.get("category", ""), term_format),
         "comments": core.get("description", ""),
         "sourceCreated": timestamp(core.get("created"), "sourceCreated"),
         "sourceModified": timestamp(core.get("modified"), "sourceModified"),
     }
 
 
-def normalize(values: dict[str, Any]) -> dict[str, Any]:
-    result = dict(values)
-    old, new = result.get("date"), result.get("created")
-    if old not in (None, "") and new not in (None, "") and old != new:
-        timestamp(old, "date")
-        timestamp(new, "created")
-        if datetime.fromisoformat(old) != datetime.fromisoformat(new):
-            raise NoteError("date and created disagree; resolve the conflict before exporting")
-    result["created"] = new if new not in (None, "") else old or ""
-    result.pop("date", None)
-    source = result.pop("sourceMetadata", None)
-    if isinstance(source, dict):
-        for key, value in source_properties(source).items():
-            result.setdefault(key, value)
-    if isinstance(result.get("promptProfile"), dict):
-        result.update(profile_properties(result["promptProfile"]))
-    if result.get("generator") == "tkn-powerpoint-note":
-        result["generator"] = ""
-        result.setdefault("generatedBy", "tkn-powerpoint-note")
-    if "generatorVersion" in result:
-        result.setdefault("generatedByVersion", result.pop("generatorVersion"))
-    for key in ("selectedSlides", "contextAnalyzedSlides", "contextOmittedSlides"):
-        if key in result:
-            result[key] = format_slides(result[key])
-    result.update(type=NOTE_TYPE, schemaVersion=SCHEMA_VERSION)
-    for key in (*HEAD, *TAIL):
-        result.setdefault(key, [] if key == "tags" else "")
-    for key in TIMESTAMPS:
-        if key in result:
-            result[key] = timestamp(result[key], key)
-    for key, value in result.items():
-        if value is None:
-            result[key] = ""
-        elif isinstance(value, list):
-            if any(not isinstance(item, (str, int, float, bool)) for item in value):
-                raise NoteError(f"{key} must be a flat list of scalars; existing note preserved")
-        elif not isinstance(value, (str, int, float, bool)):
-            raise NoteError(f"{key} must be a scalar or flat list; existing note preserved")
-    return result
+def _block(values: dict[str, Any], keys: Any) -> str:
+    selected = {
+        key: Quoted(values[key])
+        if key in QUOTED and isinstance(values[key], str)
+        else ("" if values[key] is None else values[key])
+        for key in keys
+        if key in values
+    }
+    if not selected:
+        return ""
+    return yaml.dump(
+        selected, Dumper=NoteDumper, allow_unicode=True, sort_keys=False, width=1000
+    ).rstrip()
 
 
 def dump(values: dict[str, Any]) -> str:
-    values = normalize(values)
-
-    def block(keys: Any) -> str:
-        return yaml.dump(
-            {key: values[key] for key in keys if key in values},
-            Dumper=NoteDumper,
-            allow_unicode=True,
-            sort_keys=False,
-            width=1000,
-        ).rstrip()
-
-    parts = [block(HEAD)]
+    """Proxy-note properties: fixed head and tail, comment-separated groups, extras kept."""
+    for key in (*HEAD, *TAIL):
+        if key not in values:
+            raise NoteError(f"Frontmatter lacks {key}")
+    parts = [_block(values, HEAD)]
     for label, keys in GROUPS:
         if any(key in values for key in keys):
-            parts.append(f"# --- {label} ---\n" + block(keys))
+            parts.append(f"# --- {label} ---\n" + _block(values, keys))
     extras = [key for key in values if key not in KNOWN]
     if extras:
-        parts.append("# --- Additional properties ---\n" + block(extras))
-    parts.append(block(TAIL))
+        parts.append("# --- Additional properties ---\n" + _block(values, extras))
+    parts.append(_block(values, TAIL))
     return "\n\n".join(parts) + "\n"
+
+
+def dump_export(values: dict[str, Any]) -> str:
+    return _block(values, EXPORT_ORDER) + "\n"

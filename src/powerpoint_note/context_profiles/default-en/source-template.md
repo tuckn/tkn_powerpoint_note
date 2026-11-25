@@ -1,36 +1,31 @@
-## Slide {{number}}: {{title}}
+### Slide {{number}}: {{title}}
 
-- Slide ID: {{slide_id}}; page number: {{page_number}}; hidden: {{hidden}}
 {{#section}}
-- Section: {{section}}
+Section: {{section}}
 {{/section}}
-
-{{#image}}
-{{image}}
-{{/image}}
 
 {{#context}}
 {{context}}
 {{/context}}
 
-### Extracted content
+#### Extracted Text
 
 {{content}}
 
 {{#notes}}
-### Speaker notes (source text)
+#### Speaker notes
 
 {{notes}}
 {{/notes}}
 
 {{#comments}}
-### Comments (source text)
+#### Comments
 
 {{comments}}
 {{/comments}}
 
 {{#outside}}
-### Off-slide supplements (not visible slide content)
+#### Off-slide objects
 
 {{outside}}
 {{/outside}}

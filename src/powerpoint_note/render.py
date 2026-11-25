@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -15,13 +16,19 @@ from zipfile import ZipFile
 
 from defusedxml.ElementTree import fromstring
 
-from .io import digest
 from .models import NoteError
+
+LOGGER = logging.getLogger("powerpoint_note")
+PNG = b"\x89PNG\r\n\x1a\n"
+
+
+class RenderError(NoteError):
+    """PowerPoint could not draw the selected slides; text extraction is unaffected."""
 
 
 def preflight() -> None:
     if os.name != "nt":
-        raise NoteError("--context rendering requires Windows and desktop Microsoft PowerPoint")
+        raise RenderError("--context rendering requires Windows and desktop Microsoft PowerPoint")
     try:
         importlib.import_module("win32com.client")
         import winreg
@@ -29,8 +36,9 @@ def preflight() -> None:
         with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "PowerPoint.Application\\CLSID"):
             pass
     except (ImportError, OSError) as exc:
-        raise NoteError(
-            "Check desktop PowerPoint installation and Python dependencies; reinstall with uv tool install . --reinstall"
+        raise RenderError(
+            "Check desktop PowerPoint installation and Python dependencies; "
+            "reinstall with uv tool install . --reinstall"
         ) from exc
 
 
@@ -38,26 +46,25 @@ def check_renderable(data: bytes) -> None:
     with ZipFile(BytesIO(data)) as package:
         for name in package.namelist():
             if "vbaproject" in name.lower() or name.startswith("ppt/activeX/"):
-                raise NoteError("Active content in this package cannot be rendered")
+                raise RenderError("Active content in this package cannot be rendered")
             if name.endswith(".rels"):
                 for rel in fromstring(package.read(name)):
                     if rel.get("TargetMode") == "External" and not rel.get("Type", "").endswith(
                         "/hyperlink"
                     ):
-                        raise NoteError(
+                        raise RenderError(
                             "Rendering linked resources is disabled; embed external media first"
                         )
 
 
-def render(
-    source: Path, expected_hash: str, numbers: list[int], folder: Path, width: int, timeout: int
-) -> list[Path]:
+def render(data: bytes, targets: dict[int, Path], width: int, timeout: int) -> None:
+    """Draw the given 1-based slide positions of a presentation snapshot as PNG files."""
     preflight()
-    data = source.read_bytes()
-    if digest(data) != expected_hash:
-        raise NoteError("Source changed before rendering; save the presentation and retry")
     check_renderable(data)
-    with tempfile.TemporaryDirectory(prefix="powerpoint-note-render-") as temporary:
+    # A hung PowerPoint can keep the snapshot open; never let cleanup hide the real error.
+    with tempfile.TemporaryDirectory(
+        prefix="powerpoint-note-render-", ignore_cleanup_errors=True
+    ) as temporary:
         temp = Path(temporary)
         snapshot = temp / "source.pptx"
         snapshot.write_bytes(data)
@@ -66,8 +73,7 @@ def render(
             json.dumps(
                 {
                     "source": str(snapshot),
-                    "numbers": numbers,
-                    "folder": str(folder.resolve()),
+                    "targets": {str(n): str(path.resolve()) for n, path in targets.items()},
                     "width": width,
                 }
             ),
@@ -79,23 +85,27 @@ def render(
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except subprocess.TimeoutExpired as exc:
-            raise NoteError(
-                "PowerPoint rendering timed out; previous note preserved. Close any source.pptx snapshot left open by Office, then retry."
+            raise RenderError(
+                f"PowerPoint rendering exceeded generation.limits.max_render_seconds={timeout}. "
+                "Close any source.pptx snapshot left open by Office, then retry."
             ) from exc
         if process.returncode:
-            raise NoteError(
-                "PowerPoint could not render the snapshot; check Office and any waiting dialog"
+            detail = process.stderr.strip()
+            LOGGER.debug("PowerPoint render process output:\n%s", detail)
+            reason = detail.splitlines()[-1] if detail else f"exit code {process.returncode}"
+            raise RenderError(
+                f"PowerPoint could not render the snapshot ({reason}); "
+                "check Office and any waiting dialog"
             )
-    paths = [folder / f"slide-{n:04d}.png" for n in numbers]
-    for path in paths:
-        if not path.is_file() or path.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
-            raise NoteError(f"Missing or invalid rendered slide: {path.name}")
-    return paths
+    for path in targets.values():
+        if not path.is_file() or path.read_bytes()[:8] != PNG:
+            raise RenderError(f"Missing or invalid rendered slide: {path.name}")
 
 
 def worker(request: dict[str, Any]) -> None:
@@ -112,10 +122,9 @@ def worker(request: dict[str, Any]) -> None:
             request["source"], ReadOnly=True, Untitled=False, WithWindow=False
         )
         ratio = presentation.PageSetup.SlideHeight / presentation.PageSetup.SlideWidth
-        for number in request["numbers"]:
-            output = Path(request["folder"]) / f"slide-{number:04d}.png"
-            presentation.Slides(number).Export(
-                str(output), "PNG", request["width"], round(request["width"] * ratio)
+        for number, output in request["targets"].items():
+            presentation.Slides(int(number)).Export(
+                output, "PNG", request["width"], round(request["width"] * ratio)
             )
     finally:
         try:

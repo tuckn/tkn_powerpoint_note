@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from conftest import R, write_deck
-from jsonschema import ValidationError
 
-from powerpoint_note.context import Generator
-from powerpoint_note.models import NoteError
-from powerpoint_note.render import check_renderable
+from powerpoint_note import render as render_module
+from powerpoint_note.context import ContextError, Generator, generator_label, provider_schema
+from powerpoint_note.context_profiles import load_profile
+from powerpoint_note.render import RenderError, check_renderable, render
+
+SLIDE = {"summary": "Supported", "sections": [], "uncertainties": []}
+DECK = {
+    "summary": "Supported",
+    "key_points": [{"text": "Point", "slides": [3]}],
+    "uncertainties": [],
+}
 
 
 @pytest.fixture
@@ -26,228 +35,158 @@ def bridge(monkeypatch, config):
     return bridge
 
 
-def test_actual_bridge_request_plan_contract(config, bridge):
-    generator = Generator(config["generation"], genai_profiles=config["genai_profiles"])
+def make(config):
+    return Generator(
+        config["generation"], config["genai_profiles"], load_profile(config["generation"])
+    )
+
+
+def answer(monkeypatch, bridge, data, record=None):
+    requests = []
+
+    def generate(self, request):
+        requests.append(request)
+        return SimpleNamespace(
+            data=data, record=SimpleNamespace(model_dump=lambda **kwargs: record or {})
+        )
+
+    monkeypatch.setattr(bridge.Runtime, "generate", generate)
+    return requests
+
+
+def test_plan_comes_from_this_applications_connection(config, bridge):
+    generator = make(config)
     assert generator.plan["provider"] == "codex"
     assert generator.plan["model"] == "test-model"
     assert generator.plan["profile_name"] == "codex-default"
-    assert generator.plan["generation_settings_sha256"]
     assert generator.plan["reasoning_effort"] is None
 
 
-def test_success_validation_journal_and_no_image_for_summary(config, bridge, monkeypatch, tmp_path):
+def test_success_saves_request_response_and_journal(config, bridge, monkeypatch, tmp_path):
+    record = {"provider": "codex", "response_model": "observed-model"}
+    requests = answer(monkeypatch, bridge, DECK, record)
+    generator = make(config)
+    key = generator.key("deck", "content")
+    data = generator.generate(
+        "deck", '{"slides":[]}', None, tmp_path / "deck", key, allowed_slides={3}
+    )
+    assert data == DECK and not requests[0].images
+    assert requests[0].prompt.endswith('SOURCE EVIDENCE (JSON):\n{"slides":[]}')
+    usage = json.loads((tmp_path / "deck" / "usage.json").read_text("utf-8"))
+    assert usage["status"] == "success" and usage["key"] == key and usage["input_chars"] == 13
+    assert usage["prompt_profile"] == "default-ja" and usage["record"] == record
+    assert generator_label(usage) == "codex (observed-model)"
+    assert json.loads((tmp_path / "deck" / "response.json").read_text("utf-8")) == DECK
+    assert "uniqueItems" not in json.dumps(requests[0].output_schema)
+
+
+@pytest.mark.parametrize(
+    ("stage", "data", "message"),
+    [
+        ("slide", {"summary": "", "sections": [], "uncertainties": []}, "schema at summary"),
+        ("slide", {**SLIDE, "extra": 1}, "schema at"),
+        ("slide", {**SLIDE, "summary": "<!-- powerpoint-note:end -->"}, "reserved"),
+        ("deck", {**DECK, "key_points": [{"text": "P", "slides": [9]}]}, "outside the supplied"),
+        ("deck", {**DECK, "key_points": [{"text": "P", "slides": [3, 3]}]}, "schema at key_points"),
+    ],
+)
+def test_unacceptable_output_is_rejected_with_a_reason_and_kept(
+    config, bridge, monkeypatch, tmp_path, stage, data, message
+):
+    answer(monkeypatch, bridge, data)
+    generator = make(config)
+    with pytest.raises(ContextError, match=message):
+        generator.generate(
+            stage, "{}", None, tmp_path, generator.key(stage, "c"), allowed_slides={3}
+        )
+    usage = json.loads((tmp_path / "usage.json").read_text("utf-8"))
+    assert usage["status"] == "rejected" and message.split()[0] in usage["error_message"]
+    assert json.loads((tmp_path / "rejected.json").read_text("utf-8")) == data
+    assert not (tmp_path / "response.json").exists()
+
+
+def test_provider_failure_is_reported_without_retry(config, bridge, monkeypatch, tmp_path):
     calls = []
 
     def generate(self, request):
         calls.append(request)
-        assert not request.images
-        return SimpleNamespace(
-            data={
-                "summary": "Supported",
-                "key_points": [{"text": "Point", "slides": [3]}],
-                "uncertainties": [],
-            },
-            record=SimpleNamespace(
-                model_dump=lambda **kwargs: {
-                    "usage": {"input_tokens": 10, "output_tokens": 5},
-                    "response_model": "observed-model",
-                    "reasoning_effort": "high",
-                }
-            ),
-        )
+        raise bridge.GenAIError("provider timed out", code="timeout")
 
     monkeypatch.setattr(bridge.Runtime, "generate", generate)
-    generator = Generator(config["generation"], genai_profiles=config["genai_profiles"])
-    result = generator.generate("deck", {"slides": [{"slide_number": 3}]}, None, tmp_path, "deck")
-    assert result["summary"] == "Supported"
-    assert len(calls) == 1
-    assert json.loads((tmp_path / "deck.usage.json").read_text("utf-8"))["status"] == "success"
-    record = json.loads((tmp_path / "deck.usage.json").read_text("utf-8"))["record"]
-    assert record["response_model"] == "observed-model"
-    assert record["reasoning_effort"] == "high"
+    generator = make(config)
+    with pytest.raises(ContextError, match="timeout"):
+        generator.generate("slide", "{}", None, tmp_path, generator.key("slide", "c"))
+    usage = json.loads((tmp_path / "usage.json").read_text("utf-8"))
+    assert usage["status"] == "failed" and usage["error_code"] == "timeout" and len(calls) == 1
 
 
-@pytest.mark.parametrize(
-    "result",
-    [
-        {"slide_number": 99, "summary": "Wrong citation", "sections": [], "uncertainties": []},
+def test_reuse_key_follows_content_prompt_and_model_but_not_timeouts(config, bridge):
+    generator = make(config)
+    base = generator.key("slide", "content")
+    assert generator.key("slide", "content") == base
+    assert generator.key("slide", "other") != base and generator.key("deck", "content") != base
+    config["generation"]["overrides"] = {"timeout_seconds": 999}
+    assert make(config).key("slide", "content") == base
+    config["generation"]["overrides"] = {"model": "another-model"}
+    assert make(config).key("slide", "content") != base
+    config["generation"]["prompt_profile"] = "default-en"
+    config["generation"]["overrides"] = {}
+    assert make(config).key("slide", "content") != base
+
+
+def test_provider_schema_drops_only_unique_items():
+    schema = {"type": "array", "uniqueItems": True, "items": {"type": "array", "uniqueItems": True}}
+    assert provider_schema(schema) == {"type": "array", "items": {"type": "array"}}
+    assert schema["uniqueItems"] is True
+
+
+def test_linked_resources_and_macros_are_not_rendered(tmp_path):
+    linked = write_deck(
+        tmp_path / "linked.pptx",
         {
-            "slide_number": 3,
-            "summary": "<!-- powerpoint-note:begin -->",
-            "sections": [],
-            "uncertainties": [],
-        },
-        {"slide_number": 3, "summary": "", "sections": [], "uncertainties": []},
-    ],
-)
-def test_invalid_ai_output_never_accepted(config, bridge, monkeypatch, tmp_path, result):
-    monkeypatch.setattr(
-        bridge.Runtime,
-        "generate",
-        lambda self, req: SimpleNamespace(
-            data=result, record=SimpleNamespace(model_dump=lambda **kwargs: {})
-        ),
-    )
-    generator = Generator(config["generation"], genai_profiles=config["genai_profiles"])
-    with pytest.raises((NoteError, ValidationError)):
-        generator.generate("slide", {"slide": {"number": 3}}, None, tmp_path, "invalid")
-    assert json.loads((tmp_path / "invalid.usage.json").read_text("utf-8"))["status"] == "failed"
-    assert not (tmp_path / "invalid.response.json").exists()
-
-
-def test_summary_cannot_cite_unselected_slides(config, bridge, monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        bridge.Runtime,
-        "generate",
-        lambda self, req: SimpleNamespace(
-            data={
-                "summary": "Claim",
-                "key_points": [{"text": "Point", "slides": [99]}],
-                "uncertainties": [],
-            },
-            record=SimpleNamespace(model_dump=lambda **kwargs: {}),
-        ),
-    )
-    with pytest.raises(NoteError):
-        Generator(config["generation"], genai_profiles=config["genai_profiles"]).generate(
-            "deck", {"slides": [{"slide_number": 3}]}, None, tmp_path, "invalid"
-        )
-
-
-def test_evidence_limit_prevents_provider_call(config, bridge, monkeypatch, tmp_path):
-    def forbidden(*args, **kwargs):
-        pytest.fail("Provider must not run")
-
-    monkeypatch.setattr(bridge.Runtime, "generate", forbidden)
-    config["generation"]["max_input_chars"] = 1
-    with pytest.raises(NoteError):
-        Generator(config["generation"], genai_profiles=config["genai_profiles"]).generate(
-            "deck", {"slides": []}, None, tmp_path, "large"
-        )
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_linked_resources_blocked_for_rendering(tmp_path):
-    path = write_deck(
-        tmp_path / "external.pptx",
-        {
-            "ppt/slides/_rels/slide2.xml.rels": f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="x" Type="{R}/image" Target="https://invalid.example/image.png" TargetMode="External"/></Relationships>'
+            "ppt/slides/_rels/slide2.xml.rels": f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="x" Type="{R}/image" Target="file:///C:/x.png" TargetMode="External"/></Relationships>'
         },
     )
-    with pytest.raises(NoteError):
-        check_renderable(path.read_bytes())
+    with pytest.raises(RenderError, match="linked resources"):
+        check_renderable(linked.read_bytes())
+    macro = write_deck(tmp_path / "macro.pptx", {"ppt/vbaProject.bin": "x"})
+    with pytest.raises(RenderError, match="Active content"):
+        check_renderable(macro.read_bytes())
+    hyperlink = write_deck(
+        tmp_path / "hyperlink.pptx",
+        {
+            "ppt/slides/_rels/slide2.xml.rels": f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="x" Type="{R}/hyperlink" Target="https://example.com" TargetMode="External"/></Relationships>'
+        },
+    )
+    check_renderable(hyperlink.read_bytes())
 
 
-def test_provider_schema_preserves_local_uniqueness_contract():
-    from powerpoint_note.context import provider_schema
-    from powerpoint_note.context_profiles import load_profile
-
-    schema = load_profile({"prompt_profile": "default-ja", "profile_dirs": []}).schemas["deck"]
-    projected = provider_schema(schema)
-    original_citations = schema["properties"]["key_points"]["items"]["properties"]["slides"]
-    projected_citations = projected["properties"]["key_points"]["items"]["properties"]["slides"]
-    assert original_citations["uniqueItems"] is True
-    assert "uniqueItems" not in projected_citations
-    assert projected_citations["minItems"] == 1
-
-
-def test_duplicate_citations_rejected_locally_after_transport_projection(
-    config, bridge, monkeypatch, tmp_path
+def test_render_failure_reports_the_cause_and_timeout_names_the_setting(
+    deck_path, tmp_path, monkeypatch
 ):
-    def generate(self, request):
-        assert "uniqueItems" not in json.dumps(request.output_schema)
-        return SimpleNamespace(
-            data={
-                "summary": "Claim",
-                "key_points": [{"text": "Point", "slides": [3, 3]}],
-                "uncertainties": [],
-            },
-            record=SimpleNamespace(model_dump=lambda **kwargs: {}),
-        )
-
-    monkeypatch.setattr(bridge.Runtime, "generate", generate)
-    with pytest.raises(ValidationError):
-        Generator(config["generation"], genai_profiles=config["genai_profiles"]).generate(
-            "deck", {"slides": [{"slide_number": 3}]}, None, tmp_path, "duplicates"
-        )
-    assert json.loads((tmp_path / "duplicates.usage.json").read_text("utf-8"))["status"] == "failed"
-
-
-@pytest.mark.parametrize("name,language", [("default-ja", "Japanese"), ("default-en", "English")])
-def test_selected_profile_reaches_provider_and_usage(
-    config, bridge, monkeypatch, tmp_path, name, language
-):
-    config["generation"]["prompt_profile"] = name
-
-    def generate(self, request):
-        assert language in request.prompt
-        assert "{{language}}" not in request.prompt
-        return SimpleNamespace(
-            data={"summary": "Supported", "key_points": [], "uncertainties": []},
-            record=SimpleNamespace(model_dump=lambda **kwargs: {}),
-        )
-
-    monkeypatch.setattr(bridge.Runtime, "generate", generate)
-    generator = Generator(config["generation"], genai_profiles=config["genai_profiles"])
-    generator.generate("deck", {"slides": [{"slide_number": 3}]}, None, tmp_path, "deck")
-    usage = json.loads((tmp_path / "deck.usage.json").read_text("utf-8"))
-    assert usage["prompt_profile"] == generator.content_profile.provenance()
-    assert usage["prompt_profile"]["name"] == name
-
-
-def test_generator_overrides_reach_bridge_plan_and_usage(config, bridge, monkeypatch, tmp_path):
+    monkeypatch.setattr(render_module, "preflight", lambda: None)
     monkeypatch.setattr(
-        bridge.Runtime,
-        "generate",
-        lambda self, request: SimpleNamespace(
-            data={"summary": "Supported", "key_points": [], "uncertainties": []},
-            record=SimpleNamespace(model_dump=lambda **kwargs: {}),
+        render_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stderr="Traceback...\ncom_error: PowerPoint could not open the file\n"
         ),
     )
-    config["genai_profiles"]["named-connection"] = {"provider": "codex", "model": "base"}
-    config["generation"].update(
-        generator_id="named",
-        genai_profile="named-connection",
-        overrides={"model": "overridden-model", "timeout_seconds": 450},
-    )
-    generator = Generator(config["generation"], genai_profiles=config["genai_profiles"])
-    assert generator.plan["profile_name"] == "named-connection"
-    assert config["genai_profiles"]["named-connection"]["model"] == "base"
-    assert generator.plan["model"] == "overridden-model"
-    assert generator.plan["timeout_seconds"] == 450
-    generator.generate("deck", {"slides": []}, None, tmp_path, "named")
-    usage = json.loads((tmp_path / "named.usage.json").read_text("utf-8"))
-    assert usage["generation_generator"] == "named"
-    assert usage["model"] == "overridden-model"
+    with pytest.raises(RenderError, match="com_error: PowerPoint could not open the file"):
+        render(deck_path.read_bytes(), {1: tmp_path / "slide.png"}, 1200, 5)
 
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired("render", 5)
 
-def test_unknown_genai_profile_never_falls_back(config, bridge):
-    config["generation"]["genai_profile"] = "shared-only"
-    with pytest.raises(NoteError, match="not defined in genai_profiles: shared-only"):
-        Generator(config["generation"], genai_profiles=config["genai_profiles"])
-    # Built-in names are defaults of the app config, not an implicit fallback.
-    config["generation"]["genai_profile"] = "codex-default"
-    with pytest.raises(NoteError, match="codex-default"):
-        Generator(config["generation"], genai_profiles={"custom": {"provider": "codex"}})
+    monkeypatch.setattr(render_module.subprocess, "run", hang)
+    with pytest.raises(RenderError, match="max_render_seconds=5"):
+        render(deck_path.read_bytes(), {1: tmp_path / "slide.png"}, 1200, 5)
 
+    def draw(command, **kwargs):
+        request = json.loads(Path(command[-1]).read_text("utf-8"))
+        assert request["width"] == 1200 and list(request["targets"]) == ["1"]
+        (tmp_path / "slide.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        return SimpleNamespace(returncode=0, stderr="")
 
-def test_invalid_connection_combination_fails_before_ai(config, bridge):
-    config["generation"]["overrides"] = {"local_only": True}
-    with pytest.raises(NoteError, match="genai_profiles.codex-default"):
-        Generator(config["generation"], genai_profiles=config["genai_profiles"])
-
-
-def test_context_key_keeps_the_2x_connection_field_name(config):
-    from powerpoint_note import pipeline
-
-    evidence = {"source_fingerprint": "fingerprint", "slides": []}
-    profile = SimpleNamespace(name="default-ja", language="Japanese", prompts={}, schemas={})
-    plan = {"provider": "codex", "generation_settings_sha256": "hash"}
-    legacy = {
-        ("bridge_profile" if key == "genai_profile" else key): value
-        for key, value in config["generation"].items()
-    }
-    assert "genai_profile" in config["generation"] and "bridge_profile" in legacy
-    assert pipeline._context_key(evidence, config, profile, plan) == pipeline._context_key(
-        evidence, {"generation": legacy}, profile, plan
-    )
+    monkeypatch.setattr(render_module.subprocess, "run", draw)
+    render(deck_path.read_bytes(), {1: tmp_path / "slide.png"}, 1200, 5)

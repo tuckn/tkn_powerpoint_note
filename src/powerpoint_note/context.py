@@ -1,4 +1,4 @@
-"""Optional GenAI Bridge adapter with bounded calls and persisted usage."""
+"""GenAI Bridge adapter: one bounded call per slide or summary, with a saved journal."""
 
 from __future__ import annotations
 
@@ -11,10 +11,27 @@ from typing import Any
 
 import jsonschema
 
-from .config import bridge, connection, default_genai_profiles
-from .context_profiles import ContextProfile, load_profile
-from .io import atomic_write, digest, fingerprint, json_text
+from .config import bridge, connection
+from .context_profiles import ContextProfile
+from .evidence import generation_key
+from .io import atomic_write, digest, json_text
 from .models import NoteError
+
+LOGGER = logging.getLogger("powerpoint_note")
+PLAN_FIELDS = (
+    "provider",
+    "model",
+    "profile_name",
+    "bridge_version",
+    "generation_settings_sha256",
+    "local_only",
+    "timeout_seconds",
+    "reasoning_effort",
+)
+
+
+class ContextError(NoteError):
+    """An AI call failed or returned output this application cannot accept."""
 
 
 def provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -35,70 +52,28 @@ def provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
-def generation_properties(folder: Path, files: dict[str, Any]) -> dict[str, Any]:
-    """Publish actual saved call provenance, including mixed or unknown values."""
-    values: dict[str, list[str]] = {
-        key: []
-        for key in (
-            "generator",
-            "generationProvider",
-            "generationModel",
-            "generationResponseModel",
-            "generationReasoningEffort",
-        )
-    }
-
-    def known(value: Any) -> str:
-        return value if isinstance(value, str) else ""
-
-    if "context.json" in files:
-        for name in sorted(files):
-            if not name.endswith(".usage.json"):
-                continue
-            usage = json.loads((folder / name).read_text("utf-8"))
-            if usage.get("status") != "success":
-                raise NoteError("Completed context contains an unsuccessful usage record")
-            record = usage.get("record", {})
-            provider = known(record.get("provider") or usage.get("provider"))
-            requested = known(record.get("requested_model", usage.get("model")))
-            response = known(record.get("response_model"))
-            effort = known(record.get("reasoning_effort"))
-            model = response or requested
-            row = {
-                "generator": f"{provider} ({model})" if provider and model else provider or model,
-                "generationProvider": provider,
-                "generationModel": requested,
-                "generationResponseModel": response,
-                "generationReasoningEffort": effort,
-            }
-            for key, value in row.items():
-                if value not in values[key]:
-                    values[key].append(value)
-    return {
-        key: ", ".join(items)
-        if key == "generator"
-        else items[0]
-        if len(items) == 1
-        else items
-        if items
-        else ""
-        for key, items in values.items()
-    }
+def generator_label(usage: dict[str, Any]) -> str:
+    """`provider (model)` from a saved call record; unknown parts are left out, not guessed."""
+    record = usage.get("record") or {}
+    provider = record.get("provider") or usage.get("provider") or ""
+    model = record.get("response_model") or record.get("requested_model") or usage.get("model")
+    if not isinstance(provider, str):
+        provider = ""
+    if not isinstance(model, str):
+        model = ""
+    return f"{provider} ({model})" if provider and model else provider or model
 
 
 class Generator:
     def __init__(
         self,
         settings: dict[str, Any],
-        *,
-        genai_profiles: dict[str, Any] | None = None,
-        content_profile: ContextProfile | None = None,
+        genai_profiles: dict[str, Any],
+        content_profile: ContextProfile,
     ):
         self.settings = settings
-        self.content_profile = content_profile or load_profile(settings)
+        self.content_profile = content_profile
         self.bridge = bridge()
-        if genai_profiles is None:
-            genai_profiles = default_genai_profiles()
         # Connections come only from this application's configuration, never Bridge files.
         self.profile_name = settings["genai_profile"]
         self.profile = connection(genai_profiles, self.profile_name, settings.get("overrides", {}))
@@ -112,94 +87,119 @@ class Generator:
                     ),
                     check_executable=True,
                 )
-            self.plan = {
-                key: plan.model_dump(mode="json")[key]
-                for key in (
-                    "provider",
-                    "model",
-                    "profile_name",
-                    "bridge_version",
-                    "generation_settings_sha256",
-                    "local_only",
-                    "timeout_seconds",
-                )
-            }
-            self.plan["reasoning_effort"] = plan.model_dump(mode="json").get("reasoning_effort")
         except self.bridge.GenAIError as exc:
-            raise NoteError(
+            raise ContextError(
                 f"GenAI Bridge configuration failed ({exc.code}); "
                 f"check genai_profiles.{self.profile_name}"
             ) from exc
+        dumped = plan.model_dump(mode="json")
+        self.plan = {key: dumped.get(key) for key in PLAN_FIELDS}
+
+    def key(self, stage: str, content: str) -> str:
+        """Reuse key: content, prompt, schema, profile and the model that answers."""
+        return generation_key(
+            content,
+            stage,
+            {
+                "name": self.content_profile.name,
+                "language": self.content_profile.language,
+                "prompt": self.content_profile.prompts[stage],
+                "schema": self.content_profile.schemas[stage],
+            },
+            self.plan,
+        )
 
     def generate(
-        self, stage: str, evidence: dict[str, Any], image: Path | None, folder: Path, name: str
+        self,
+        stage: str,
+        payload: str,
+        image: Path | None,
+        folder: Path,
+        key: str,
+        *,
+        allowed_slides: set[int] | None = None,
     ) -> dict[str, Any]:
-        payload = json_text(evidence)
-        if len(payload) > self.settings["max_input_chars"]:
-            raise NoteError(
-                "AI evidence exceeds generation.max_input_chars; select fewer slides or raise the limit"
-            )
+        """Call the provider once and save request, journal and the validated response."""
         schema = self.content_profile.schemas[stage]
-        prompt = self.content_profile.prompts[stage]
-        prompt += "\nSOURCE EVIDENCE (JSON):\n" + payload
+        prompt = self.content_profile.prompts[stage] + "\nSOURCE EVIDENCE (JSON):\n" + payload
         request = self.bridge.GenerationRequest(
             prompt=prompt,
             output_schema=provider_schema(schema),
             schema_name="powerpoint_" + stage,
             images=[self.bridge.ImageInput.from_file(image)] if image else [],
         )
-        journal = {
+        journal: dict[str, Any] = {
             "status": "started",
+            "key": key,
+            "stage": stage,
             "started_at": datetime.now(UTC).isoformat(),
+            "input_chars": len(payload),
             "prompt_sha256": digest(prompt.encode()),
-            "schema_sha256": fingerprint(schema),
             **self.plan,
-            "prompt_profile": self.content_profile.provenance(),
+            "prompt_profile": self.content_profile.name,
             "generation_generator": self.settings.get("generator_id"),
-            "provider_schema_sha256": fingerprint(request.output_schema),
         }
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "response.json").unlink(missing_ok=True)
         atomic_write(
-            folder / (name + ".request.json"),
+            folder / "request.json",
             json_text(
                 {"prompt": prompt, "schema": schema, "provider_schema": request.output_schema}
             ),
         )
-        journal_path = folder / (name + ".usage.json")
+        journal_path = folder / "usage.json"
         atomic_write(journal_path, json_text(journal))
         started = time.monotonic()
+        data: Any = None
         try:
             with self.bridge.Runtime(self.profile, profile_name=self.profile_name) as runtime:
                 result = runtime.generate(request)
-            data: dict[str, Any] = result.data
-            jsonschema.Draft202012Validator(schema).validate(data)
-            if stage == "slide" and data["slide_number"] != evidence["slide"]["number"]:
-                raise NoteError("AI output cited a different slide number")
-            if stage == "deck":
-                allowed = {item["slide_number"] for item in evidence["slides"]}
-                if any(set(item["slides"]) - allowed for item in data["key_points"]):
-                    raise NoteError("AI summary cited a slide outside selected coverage")
-            if "powerpoint-note:" in json.dumps(data):
-                raise NoteError("AI returned reserved Markdown management markers")
-            journal["status"] = "success"
+            data = result.data
             journal["record"] = result.record.model_dump(mode="json")
-            atomic_write(folder / (name + ".response.json"), json_text(data))
-            return data
+            try:
+                jsonschema.Draft202012Validator(schema).validate(data)
+            except jsonschema.ValidationError as exc:
+                where = "/".join(str(part) for part in exc.absolute_path) or "(root)"
+                raise ContextError(f"AI output does not match the schema at {where}") from exc
+            if (
+                stage == "deck"
+                and allowed_slides is not None
+                and any(set(item["slides"]) - allowed_slides for item in data["key_points"])
+            ):
+                raise ContextError("AI summary cited a slide outside the supplied slides")
+            if "powerpoint-note:" in json.dumps(data):
+                raise ContextError("AI returned reserved Markdown management markers")
+            journal["status"] = "success"
+            atomic_write(folder / "response.json", json_text(data))
+            validated: dict[str, Any] = data
+            return validated
         except self.bridge.GenAIError as exc:
             journal["status"] = "failed"
             journal["error_code"] = exc.code
             journal["error_message"] = str(exc)
             if exc.record is not None:
                 journal["record"] = exc.record.model_dump(mode="json")
-            raise NoteError(
-                f"AI generation failed ({exc.code}); no automatic retry; inspect usage JSON"
+            raise ContextError(
+                f"AI generation failed ({exc.code}); no automatic retry; see {journal_path}"
             ) from exc
-        except BaseException:
+        except ContextError as exc:
+            # Keep what the provider returned so the rejection can be diagnosed.
+            journal["status"] = "rejected"
+            journal["error_message"] = str(exc)
+            atomic_write(folder / "rejected.json", json_text(data))
+            raise ContextError(f"{exc}; the rejected output is in {folder}") from exc
+        except BaseException as exc:
             journal["status"] = "failed"
+            journal["error_message"] = type(exc).__name__
             raise
         finally:
             journal["duration_seconds"] = round(time.monotonic() - started, 3)
             journal["finished_at"] = datetime.now(UTC).isoformat()
             atomic_write(journal_path, json_text(journal))
-            logging.getLogger("powerpoint_note").info(
-                "AI %s: %s (%.1fs)", name, journal["status"], journal["duration_seconds"]
+            LOGGER.info(
+                "AI %s %s: %s (%.1fs)",
+                stage,
+                folder.name,
+                journal["status"],
+                journal["duration_seconds"],
             )

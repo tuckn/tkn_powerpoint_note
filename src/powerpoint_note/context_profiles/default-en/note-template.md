@@ -1,11 +1,11 @@
-Selected slides: {{coverage}}
+## Presentation Map
 
-{{mode}}
-
-{{evidence}}
+{{map}}
 
 {{#overview}}
 {{overview}}
 {{/overview}}
+
+## Slides
 
 {{slides}}

@@ -26,17 +26,13 @@ RESOURCES = (
     "source-template.md",
 )
 FIELDS = {
-    "slide": {"summary", "sections", "uncertainties"},
+    "slide": {"stale", "summary", "sections", "uncertainties", "image"},
     "deck": {"summary", "key_points", "uncertainties"},
-    "note": {"coverage", "mode", "evidence", "overview", "slides"},
+    "note": {"map", "overview", "slides"},
     "source": {
         "number",
         "title",
-        "slide_id",
-        "page_number",
-        "hidden",
         "section",
-        "image",
         "context",
         "content",
         "notes",
@@ -46,30 +42,23 @@ FIELDS = {
     },
 }
 LABELS = {
-    "local",
-    "ai",
     "personal",
-    "evidence",
     "slide",
     "column",
     "merged_cells",
     "chart",
     "smartart",
-    "object",
-    "endpoints",
-    "text",
+    "picture",
     "location_outside",
     "location_partial",
     "location_unknown",
-    "hidden_yes",
-    "hidden_no",
-    "unknown_value",
+    "stale",
+    "skipped",
 }
 TOKEN = re.compile(r"{{\s*([#/]?)([a-z][a-z0-9_]*)\s*}}")
 # Renderer compatibility is code; semantic constraints and descriptions live in the schemas.
 CONTRACTS: dict[str, Any] = {
     "slide": {
-        "slide_number": "integer",
         "summary": "string",
         "sections": [{"heading": "string", "body": "string"}],
         "uncertainties": ["string"],
@@ -194,7 +183,7 @@ def load_profile(settings: dict[str, Any]) -> ContextProfile:
     custom = next(
         (
             Path(root).expanduser().resolve() / name
-            for root in settings["profile_dirs"]
+            for root in settings["prompt_profile_dirs"]
             if (Path(root).expanduser().resolve() / name).exists()
         ),
         None,
@@ -206,7 +195,7 @@ def load_profile(settings: dict[str, Any]) -> ContextProfile:
     if not root.is_dir():
         raise NoteError(
             f"Unknown or invalid prompt profile {name!r}; built-ins: default-ja, default-en; "
-            "check generation.prompt_profile and generation.profile_dirs"
+            "check generation.prompt_profile and generation.prompt_profile_dirs"
         )
     try:
         resources = {
@@ -225,9 +214,9 @@ def load_profile(settings: dict[str, Any]) -> ContextProfile:
         if (
             not isinstance(metadata, dict)
             or not isinstance(metadata.get("version"), str)
-            or not re.fullmatch(r"1\.0\.(0|[1-9]\d*)", metadata["version"])
+            or not re.fullmatch(r"2\.0\.(0|[1-9]\d*)", metadata["version"])
         ):
-            raise NoteError(f"Profile {name!r}: unsupported template version; supported: 1.0.x")
+            raise NoteError(f"Profile {name!r}: unsupported template version; supported: 2.0.x")
         language, labels = metadata.get("language"), metadata.get("labels")
         if not isinstance(language, str) or not language.strip():
             raise NoteError(f"Profile {name!r}: language must be nonempty template metadata")

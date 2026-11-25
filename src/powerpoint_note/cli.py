@@ -1,8 +1,9 @@
-"""The public, file-oriented CLI. Logs on stderr; results on stdout."""
+"""The public CLI. Logs on stderr; one result on stdout."""
 
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -10,87 +11,71 @@ from typing import Any, NoReturn
 from . import __version__
 from .config import initialize, resolve, user_config
 from .logging_utils import SUCCESS, configure
-from .models import NoteError
+from .models import ConfigError
 from .output import emit
-from .pipeline import build, default_output, inspect, verify
+from .pipeline import Options, export, list_slides, pull, summarize
+
+EXIT_OK, EXIT_FAILED, EXIT_ARGUMENT, EXIT_CONFIG, EXIT_INTERRUPTED = 0, 1, 2, 3, 130
+
+
+class ArgumentError(Exception):
+    """Invalid command line (exit code 2)."""
 
 
 class Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
-        raise NoteError(message)
-
-
-class Replaced(argparse.Action):
-    """Hidden removed option that fails with the option that replaced it."""
-
-    def __init__(self, option_strings: list[str], dest: str, replacement: str) -> None:
-        self.replacement = replacement
-        super().__init__(
-            option_strings, dest, nargs="?", default=argparse.SUPPRESS, help=argparse.SUPPRESS
-        )
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Any,
-        option_string: str | None = None,
-    ) -> NoReturn:
-        parser.error(
-            f"{option_string} was replaced by {self.replacement}; "
-            "define connections in genai_profiles"
-        )
+        raise ArgumentError(message)
 
 
 def common(parser: argparse.ArgumentParser) -> None:
+    """Options accepted before or after every command."""
     parser.add_argument(
         "--config",
         type=Path,
         default=argparse.SUPPRESS,
         help="Additional config file; overrides user and working-directory settings.",
     )
-    logs = parser.add_mutually_exclusive_group()
-    logs.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Only errors on stderr.",
-    )
-    logs.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Include diagnostics on stderr.",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Print one machine-readable JSON result instead of key=value lines.",
-    )
+    for flags, text in (
+        (("-q", "--quiet"), "Only errors on stderr."),
+        (("-v", "--verbose"), "Include diagnostics on stderr."),
+        (("--no-color",), "Write logs without color."),
+        (("--json",), "Print one JSON result instead of key=value lines."),
+    ):
+        parser.add_argument(*flags, action="store_true", default=argparse.SUPPRESS, help=text)
 
 
-def selectors(parser: argparse.ArgumentParser) -> None:
+def generation(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--slides", help="1-based positions/ranges, e.g. 1,3-5. Default: all visible slides."
+        "--context",
+        action="store_true",
+        help="Explain slides with AI from PowerPoint images; selected images and text are "
+        "sent to the configured provider.",
+    )
+    parser.add_argument(
+        "--slides", help="With --context: 1-based positions or ranges to explain, e.g. 1,3-5."
     )
     parser.add_argument(
         "--section",
         action="append",
-        help="Exact section name; repeat for multiple names. Intersects --slides.",
+        help="With --context: exact section name to explain; repeatable. Intersects --slides.",
+    )
+    parser.add_argument("--generator", help="Named generation settings in generation.generators.")
+    parser.add_argument("--profile", help="Prompt profile, e.g. default-ja or default-en.")
+    parser.add_argument(
+        "--max-slides",
+        type=int,
+        help="Slides sent to AI per presentation in this run (default: 10). Never truncates.",
     )
     parser.add_argument(
         "--include-hidden",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Include hidden slides (default: excluded).",
+        help="Include hidden slides in the note (default: excluded).",
     )
     parser.add_argument(
         "--off-slide",
         choices=["exclude", "append"],
-        help="Fully outside objects: exclude (default) or separate supplement.",
+        help="Objects fully outside the slide: exclude (default) or list them separately.",
     )
     parser.add_argument(
         "--notes",
@@ -104,188 +89,219 @@ def selectors(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Extract comments (default: yes).",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change. No files, PowerPoint, network or AI calls.",
+    )
 
 
 def make_parser() -> argparse.ArgumentParser:
     parser = Parser(
         prog="tkn-powerpoint-note",
-        description="Create PowerPoint Markdown notes; add --context for visual interpretation. Originals are read-only.",
+        description="Turn PowerPoint presentations into Markdown notes; --context adds AI "
+        "explanations of slide images. Presentations are never modified.",
+        allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=__version__)
     common(parser)
     subs = parser.add_subparsers(dest="command", required=True)
-    view = subs.add_parser(
-        "inspect", help="Read selected slide titles, sections and object counts."
-    )
-    common(view)
-    view.add_argument("source", type=Path)
-    selectors(view)
-    create = subs.add_parser("export", help="Export a Markdown note and evidence; AI is opt-in.")
+
+    create = subs.add_parser("export", help="Write Markdown beside a presentation or folder.")
     common(create)
-    create.add_argument("source", type=Path)
+    create.add_argument("input_path", type=Path, metavar="PATH", help="A .pptx/.pptm or a folder.")
     create.add_argument(
-        "-o",
-        "--output",
+        "-o", "--output", type=Path, help="Destination .md for one file (default: <file>.md)."
+    )
+    generation(create)
+    create.add_argument("--force", action="store_true", help="Replace an existing Markdown file.")
+
+    fetch = subs.add_parser("pull", help="Create or update the proxy notes of a source.")
+    common(fetch)
+    scope = fetch.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--source", help="Source ID in sources.")
+    scope.add_argument("--all-sources", action="store_true", help="Every configured source.")
+    fetch.add_argument(
+        "presentation",
+        nargs="?",
         type=Path,
-        help="Destination .md; default: ~/.tkn/powerpoint_note/data/<source-path-id>/<source>.md",
+        help="One presentation, relative to or inside presentations.dir.",
     )
-    selectors(create)
-    create.add_argument(
-        "--context",
-        action="store_true",
-        help="Use PowerPoint images and GenAI Bridge; selected images/text leave this app for the configured provider.",
-    )
-    create.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Validate/preview only. No persistent files, Office launch, authentication, network or AI calls.",
-    )
-    create.add_argument(
+    generation(fetch)
+    fetch.add_argument(
         "--force",
         action="store_true",
-        help="Back up and replace edited/reviewed generated content; preserves handwriting outside markers.",
+        help="Back up and replace notes whose generated part was edited by hand.",
     )
-    create.add_argument(
-        "--refresh",
-        action="store_true",
-        help="Regenerate context even for unchanged input; requires --context and can incur charges.",
-    )
-    create.add_argument(
-        "--generator", help="Named generation settings; overrides generation.default_generator."
-    )
-    create.add_argument(
-        "--genai-profile",
-        help="Connection name in genai_profiles (default: codex-default).",
-    )
-    create.add_argument("--bridge-profile", action=Replaced, replacement="--genai-profile")
-    create.add_argument(
-        "--prompt-profile",
-        help="Content profile: default-ja (default), default-en, or a complete custom bundle.",
-    )
-    create.add_argument(
-        "--max-slides",
-        type=int,
-        help="Maximum selected slides for --context (default: 10). Fails rather than truncating.",
-    )
-    check = subs.add_parser(
-        "verify",
-        help="Verify note, evidence and source hashes; does not assess AI semantic accuracy.",
-    )
-    common(check)
-    check.add_argument("note", type=Path)
-    check.add_argument("--source", type=Path, help="Source location if the presentation moved.")
-    config = subs.add_parser("config", help="Create or inspect defaults and setting sources.")
+
+    state = subs.add_parser("status", help="Show what pull would change; writes nothing.")
+    common(state)
+    state.add_argument("--source", required=True, help="Source ID in sources.")
+
+    deck = subs.add_parser("presentation", help="Inspect a saved presentation.")
+    common(deck)
+    deck_sub = deck.add_subparsers(dest="presentation_command", required=True)
+    slides = deck_sub.add_parser("list-slides", help="List slides, sections and hidden state.")
+    common(slides)
+    slides.add_argument("--presentation", type=Path, required=True, help="A .pptx or .pptm file.")
+
+    config = subs.add_parser("config", help="Create or inspect settings.")
     common(config)
     config_sub = config.add_subparsers(dest="config_command", required=True)
-    init = config_sub.add_parser(
-        "init", help="Write example user config; edited files are protected."
-    )
+    init = config_sub.add_parser("init", help="Write the example user config; never overwrites.")
     common(init)
-    init.add_argument("--output", type=Path, help="Explicit alternative config output.")
+    init.add_argument("--output", type=Path, help="Write the example to another path.")
     init.add_argument("--dry-run", action="store_true", help="Preview without creating files.")
-    listing = config_sub.add_parser("list", help="List effective settings and winning sources.")
+    listing = config_sub.add_parser(
+        "list", help="List effective settings and where they came from."
+    )
     common(listing)
-    listing.add_argument("--generator", help="Inspect effective settings for a named generator.")
+    listing.add_argument("--generator", help="Show the settings of a named generator.")
+    listing.add_argument("--source", help="Show the settings used for a source.")
     return parser
 
 
 def overrides(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     mapping = {
-        "slides": ("selection", "slides"),
-        "section": ("selection", "sections"),
-        "include_hidden": ("selection", "include_hidden"),
-        "off_slide": ("selection", "off_slide"),
+        "include_hidden": ("extraction", "include_hidden"),
+        "off_slide": ("extraction", "off_slide"),
         "notes": ("extraction", "include_notes"),
         "comments": ("extraction", "include_comments"),
-        "genai_profile": ("generation", "genai_profile"),
-        "prompt_profile": ("generation", "prompt_profile"),
-        "max_slides": ("generation", "max_slides"),
+        "profile": ("generation", "prompt_profile"),
     }
     for arg, (group, key) in mapping.items():
         value = getattr(args, arg, None)
         if value is not None:
             result.setdefault(group, {})[key] = value
+    if getattr(args, "max_slides", None) is not None:
+        result.setdefault("generation", {})["limits"] = {"max_slides": args.max_slides}
     return result
 
 
-def error_result(message: str, args: argparse.Namespace | None) -> dict[str, Any]:
-    result: dict[str, Any] = {"status": "failed", "error": message}
+def command_name(args: argparse.Namespace | None) -> str | None:
+    if args is None:
+        return None
+    command: str | None = getattr(args, "command", None)
+    sub = getattr(args, "config_command", None) or getattr(args, "presentation_command", None)
+    return f"{command} {sub}" if command and sub else command
+
+
+def error_targets(
+    args: argparse.Namespace | None, exc: BaseException | None = None
+) -> dict[str, Any]:
+    """Paths and IDs the failed command referred to, separate from the message."""
+    targets: dict[str, Any] = {}
     if args is not None:
-        for field in ("source", "note", "output", "config"):
-            value = getattr(args, field, None)
-            if isinstance(value, Path):
-                result[f"{field}_path"] = str(value.expanduser().absolute())
-        if args.command == "config" and args.config_command == "init":
-            result.setdefault("output_path", str(user_config().expanduser().absolute()))
-    return result
+        for attribute, key in (
+            ("config", "configPath"),
+            ("input_path", "inputPath"),
+            ("output", "outputPath"),
+            ("presentation", "presentationPath"),
+            ("source", "sourceId"),
+        ):
+            value = getattr(args, attribute, None)
+            if value is not None:
+                targets[key] = str(value)
+    if isinstance(exc, OSError) and exc.filename:
+        targets["targetPath"] = str(exc.filename)
+    return targets
+
+
+def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    explicit = getattr(args, "config", None)
+    if args.command == "config" and args.config_command == "init":
+        target = (args.output or user_config()).expanduser().resolve()
+        return initialize(target, args.dry_run), EXIT_OK
+    if args.command == "config":
+        config, details = resolve(explicit, generator=args.generator, source=args.source)
+        return {"status": "success", "command": "config list", "config": config, **details}, EXIT_OK
+    if args.command == "presentation":
+        config, _ = resolve(explicit)
+        return list_slides(args.presentation, config), EXIT_OK
+    if args.command == "status":
+        options = Options(dry_run=True)
+        config, _ = resolve(explicit, source=args.source)
+        result = summarize("status", pull(args.source, config, options), options)
+        return result, EXIT_FAILED if result["errors"] else EXIT_OK
+    options = Options(
+        context=args.context,
+        force=args.force,
+        dry_run=args.dry_run,
+        slides=args.slides,
+        sections=args.section or [],
+    )
+    if not args.context and (
+        args.slides or args.section or args.generator or args.profile or args.max_slides
+    ):
+        raise ArgumentError(
+            "--slides, --section, --generator, --profile and --max-slides require --context"
+        )
+    if args.command == "export":
+        config, _ = resolve(explicit, overrides(args), generator=args.generator)
+        result = export(args.input_path, args.output, config, options)
+        return result, EXIT_FAILED if result["errors"] else EXIT_OK
+    if args.presentation is not None and args.all_sources:
+        raise ArgumentError("A presentation path requires --source, not --all-sources")
+    config, _ = resolve(explicit)
+    sources = sorted(config["sources"]) if args.all_sources else [args.source]
+    if not sources:
+        raise ConfigError("No sources are configured; add one under sources in config.yaml")
+    rows: list[dict[str, Any]] = []
+    for source in sources:
+        config, _ = resolve(explicit, overrides(args), generator=args.generator, source=source)
+        rows.extend(pull(source, config, options, args.presentation))
+    result = {**summarize("pull", rows, options), "sources": sources}
+    return result, EXIT_FAILED if result["errors"] else EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    option_tokens = argv[: argv.index("--")] if "--" in argv else argv
-    json_output = "--json" in option_tokens
+    tokens = argv[: argv.index("--")] if "--" in argv else argv
+    json_output = "--json" in tokens
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
-    logger = configure(quiet="--quiet" in option_tokens or "-q" in option_tokens,
-                       verbose="--verbose" in option_tokens or "-v" in option_tokens)
+    quiet = "--quiet" in tokens or "-q" in tokens
+    verbose = "--verbose" in tokens or "-v" in tokens
+    logger = configure(quiet, verbose, no_color="--no-color" in tokens)
     args: argparse.Namespace | None = None
+
+    def fail(status: str, message: str, code: int, exc: BaseException | None = None) -> int:
+        emit(
+            {
+                "status": status,
+                "command": command_name(args),
+                "message": message,
+                **error_targets(args, exc),
+            },
+            json_output=json_output,
+        )
+        return code
+
     try:
         args = make_parser().parse_args(argv)
-        if getattr(args, "quiet", False) and getattr(args, "verbose", False):
-            raise NoteError("--quiet and --verbose cannot be combined")
-        logger = configure(getattr(args, "quiet", False), getattr(args, "verbose", False))
-        if args.command == "config" and args.config_command == "init":
-            result = initialize((args.output or user_config()).expanduser().resolve(), args.dry_run)
-        elif args.command == "verify":
-            result = verify(
-                args.note.expanduser().resolve(),
-                args.source.expanduser().resolve() if args.source else None,
-            )
-        else:
-            config, details = resolve(
-                getattr(args, "config", None),
-                overrides(args),
-                generator=getattr(args, "generator", None),
-            )
-            if args.command == "config":
-                result = {"status": "success", "config": config, **details}
-            elif args.command == "inspect":
-                result = inspect(args.source.expanduser().resolve(), config)
-                result = {"source": str(args.source.expanduser().resolve()), **result}
-            else:
-                result = build(
-                    args.source,
-                    args.output or default_output(args.source),
-                    config,
-                    context=args.context,
-                    dry_run=args.dry_run,
-                    force=args.force,
-                    refresh=args.refresh,
-                )
-        listing = args.command == "config" and args.config_command == "list"
-        if listing:
+        if quiet and verbose:
+            raise ArgumentError("--quiet and --verbose cannot be combined")
+        result, code = execute(args)
+        if command_name(args) == "config list":
             logger.info("Showing resolved configuration")
         else:
-            logger.log(SUCCESS, "%s", result.get("status", "success"))
+            level = SUCCESS if code == EXIT_OK else logging.ERROR
+            logger.log(level, "%s", result.get("status", "success"))
         emit(result, json_output=json_output)
-        return 0
-    except NoteError as exc:
+        return code
+    except ArgumentError as exc:
         logger.error("%s", exc)
-        emit(error_result(str(exc), args), json_output=json_output)
-        return 2
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        logger.error("Cannot complete command (%s): %s", type(exc).__name__, exc)
-        logger.debug("Diagnostic traceback", exc_info=True)
-        emit(error_result(str(exc), args), json_output=json_output)
-        return 2
+        return fail("argument-error", str(exc), EXIT_ARGUMENT)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return fail("config-error", str(exc), EXIT_CONFIG, exc)
     except KeyboardInterrupt:
-        logger.error("Interrupted")
-        emit(error_result("interrupted", args), json_output=json_output)
-        return 130
+        logger.error("Interrupted; completed notes and saved AI results are kept.")
+        return fail("interrupted", "Interrupted", EXIT_INTERRUPTED)
     except Exception as exc:
-        logger.error("Processing failed (%s); use --verbose for diagnostics", type(exc).__name__)
+        # Processing failures and anything unexpected: one result, details with --verbose.
+        logger.error("%s: %s", type(exc).__name__, exc)
         logger.debug("Diagnostic traceback", exc_info=True)
-        emit(error_result(type(exc).__name__, args), json_output=json_output)
-        return 1
+        return fail("error", str(exc) or type(exc).__name__, EXIT_FAILED, exc)

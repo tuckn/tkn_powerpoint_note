@@ -7,7 +7,11 @@ from typing import Any
 
 
 class NoteError(Exception):
-    """An actionable input, configuration, or processing error."""
+    """An actionable processing error (exit code 1)."""
+
+
+class ConfigError(NoteError):
+    """A configuration or target-selection error (exit code 3)."""
 
 
 @dataclass
@@ -17,7 +21,7 @@ class Shape:
     name: str
     role: str = ""
     paragraphs: list[dict[str, Any]] = field(default_factory=list)
-    bbox: list[float] | None = None
+    bbox: list[int] | None = None
     location: str = "unknown"
     alt_text: str = ""
     table: list[list[str]] = field(default_factory=list)
@@ -41,6 +45,7 @@ class Slide:
     notes: str = ""
     comments: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    fingerprint: str = ""
 
 
 @dataclass

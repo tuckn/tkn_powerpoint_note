@@ -8,10 +8,13 @@ import sys
 from unittest.mock import Mock
 
 import pytest
+from conftest import make_deck
 
 from powerpoint_note import __version__, cli
 from powerpoint_note.logging_utils import SUCCESS, ColorFormatter, configure, supports_color
 from powerpoint_note.output import result_lines
+
+SLIDES = [(256, "One", "first body"), (257, "Two", "second body")]
 
 
 def run_cli(*args, cwd):
@@ -27,174 +30,145 @@ def run_cli(*args, cwd):
     )
 
 
-def test_entrypoint_help_version_and_e2e(deck_path, tmp_path):
+def test_help_version_and_export_end_to_end(tmp_path):
     help_result = run_cli("--help", cwd=tmp_path)
     assert help_result.returncode == 0
-    assert "export" in help_result.stdout and "build" not in help_result.stdout
+    for command in ("export", "pull", "status", "presentation", "config"):
+        assert command in help_result.stdout
     version = run_cli("--version", cwd=tmp_path)
     assert version.returncode == 0 and version.stdout.strip() == __version__
-    output = tmp_path / "result.md"
-    built = run_cli("export", deck_path, "--output", output, cwd=tmp_path)
+    deck = make_deck(tmp_path / "deck.pptx", SLIDES)
+    built = run_cli("export", deck, cwd=tmp_path)
     assert built.returncode == 0, built.stderr
-    assert "status=created" in built.stdout.splitlines()
-    assert f"output={output}" in built.stdout.splitlines()
-    assert "[SUCCESS]" in built.stderr
-    verified = run_cli("verify", output, "--json", cwd=tmp_path)
-    assert verified.returncode == 0
-    assert json.loads(verified.stdout)["status"] == "verified"
-    viewed = run_cli("inspect", deck_path, cwd=tmp_path)
-    assert viewed.returncode == 0
-    assert f"source={deck_path}" in viewed.stdout.splitlines()
-    assert any(line.startswith("slides[0].title=") for line in viewed.stdout.splitlines())
-    assert "\x1b[" not in viewed.stdout
+    lines = built.stdout.splitlines()
+    assert "status=success" in lines and "exported=1" in lines and "command=export" in lines
+    assert f"results[0].outputPath={tmp_path / 'deck.pptx.md'}" in lines
+    assert "[SUCCESS] success" in built.stderr
+    again = run_cli("--json", "export", deck, cwd=tmp_path)
+    assert again.returncode == 1
+    payload = json.loads(again.stdout)
+    assert payload["status"] == "error" and payload["results"][0]["status"] == "export-error"
 
 
-def test_cli_config_list_readonly_and_error(tmp_path):
-    listing = run_cli("config", "list", cwd=tmp_path)
-    assert listing.returncode == 0, listing.stderr
-    assert listing.stderr == "[INFO] Showing resolved configuration\n"
-    assert "effective_schema_version=3.0.0" in listing.stdout.splitlines()
-    assert "status=success" in listing.stdout.splitlines()
-    assert "config.selection.sections=[]" in listing.stdout.splitlines()
-    assert any(
-        line.startswith("winning_sources.generation.max_slides=")
-        for line in listing.stdout.splitlines()
+def test_pull_status_and_listing_through_the_command_line(source, tmp_path):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    config = source["config_path"]
+    status = run_cli("status", "--source", "demo", "--config", config, "--json", cwd=tmp_path)
+    assert status.returncode == 0, status.stderr
+    assert json.loads(status.stdout)["statusCounts"] == {"would-create": 1}
+    assert not source["notes"].exists()
+    pulled = run_cli("--config", config, "pull", "--all-sources", "--json", cwd=tmp_path)
+    assert pulled.returncode == 0, pulled.stderr
+    result = json.loads(pulled.stdout)
+    assert (result["command"], result["sources"], result["changed"]) == ("pull", ["demo"], 1)
+    assert result["results"][0]["notePath"] == str(source["notes"] / "deck.pptx.md")
+    one = run_cli("pull", "--source", "demo", "deck.pptx", "--config", config, cwd=tmp_path)
+    assert one.returncode == 0 and "statusCounts.unchanged=1" in one.stdout.splitlines()
+    listed = run_cli(
+        "presentation",
+        "list-slides",
+        "--presentation",
+        source["decks"] / "deck.pptx",
+        "--json",
+        cwd=tmp_path,
     )
-    machine = run_cli("config", "list", "--json", cwd=tmp_path)
-    assert machine.returncode == 0
-    assert machine.stderr == "[INFO] Showing resolved configuration\n"
-    assert json.loads(machine.stdout)["effective_schema_version"] == "3.0.0"
-    quiet = run_cli("config", "list", "--quiet", cwd=tmp_path)
-    assert quiet.returncode == 0 and quiet.stderr == ""
-    bad = run_cli("export", "missing.pptx", cwd=tmp_path)
-    assert bad.returncode == 2 and "status=failed" in bad.stdout.splitlines()
-    assert f"source_path={tmp_path / 'missing.pptx'}" in bad.stdout.splitlines()
-    bad_json = run_cli("--json", "export", "missing.pptx", cwd=tmp_path)
-    assert bad_json.returncode == 2 and json.loads(bad_json.stdout)["status"] == "failed"
-    assert "Traceback" not in bad.stderr
-
-
-def test_result_lines_preserve_windows_paths_and_flatten_nested_values():
-    lines = list(result_lines({"path": r"C:\Users\ExampleUser\profiles", "items": [{"active": True}], "note": "a\nb"}))
-    assert lines == [
-        r"path=C:\Users\ExampleUser\profiles",
-        "items[0].active=true",
-        r"note=a\nb",
-    ]
+    slides = json.loads(listed.stdout)
+    assert slides["totalSlides"] == 2 and slides["slides"][1]["title"] == "Two"
+    shown = run_cli("config", "list", "--config", config, "--source", "demo", cwd=tmp_path)
+    assert shown.returncode == 0
+    assert f"config.sources.demo.notes.dir={source['notes']}" in shown.stdout.splitlines()
+    assert "[INFO] Showing resolved configuration" in shown.stderr
 
 
 @pytest.mark.parametrize(
-    "args", [["--quiet", "--verbose", "config", "list"], ["--quiet", "config", "list", "--verbose"]]
+    ("args", "status", "code"),
+    [
+        (["export"], "argument-error", 2),
+        (["nonsense"], "argument-error", 2),
+        (["pull"], "argument-error", 2),
+        (["pull", "--source", "a", "--all-sources"], "argument-error", 2),
+        (["export", "x.pptx", "--slides", "1"], "argument-error", 2),
+        (["-q", "-v", "config", "list"], "argument-error", 2),
+        (["export", "absent.pptx"], "config-error", 3),
+        (["pull", "--source", "absent"], "config-error", 3),
+        (["pull", "--all-sources"], "config-error", 3),
+        (["config", "list", "--config", "absent.yaml"], "config-error", 3),
+        (["presentation", "list-slides", "--presentation", "absent.pptx"], "config-error", 3),
+    ],
 )
-def test_quiet_verbose_mutually_exclusive(tmp_path, args):
-    result = run_cli(*args, cwd=tmp_path)
-    assert result.returncode != 0
-    assert "status=failed" in result.stdout.splitlines()
+def test_failures_keep_the_format_and_use_distinct_exit_codes(
+    tmp_path, monkeypatch, capsys, args, status, code
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert cli.main([*args, "--json"]) == code
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == status and result["message"]
+    assert cli.main(args) == code
+    assert f"status={status}" in capsys.readouterr().out.splitlines()
 
 
-def test_removed_build_and_unsupported_sync_commands(tmp_path):
-    for command in ("build", "pull", "push"):
-        result = run_cli(command, "--help", cwd=tmp_path)
-        assert result.returncode == 2
-    old_config = run_cli("config", "show", cwd=tmp_path)
-    assert old_config.returncode == 2
-
-
-@pytest.mark.parametrize("args", [
-    ("--json", "config", "list"),
-    ("config", "--json", "list"),
-    ("config", "list", "--json"),
-])
-def test_json_at_every_command_level(tmp_path, args):
-    result = run_cli(*args, cwd=tmp_path)
-    assert result.returncode == 0
-    assert json.loads(result.stdout)["status"] == "success"
-    assert "[INFO]" in result.stderr and "[INFO]" not in result.stdout
-
-
-def test_parse_error_and_interrupt_honor_json(tmp_path, monkeypatch, capsys):
-    bad = run_cli("config", "--json", "missing", cwd=tmp_path)
-    assert bad.returncode == 2 and json.loads(bad.stdout)["status"] == "failed"
-    monkeypatch.setattr(cli, "resolve", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+def test_interrupt_unexpected_errors_and_targets(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli, "resolve", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
     assert cli.main(["--json", "config", "list"]) == 130
-    captured = capsys.readouterr()
-    assert json.loads(captured.out)["error"] == "interrupted"
-    assert cli.main(["config", "list"]) == 130
-    assert "error=interrupted" in capsys.readouterr().out.splitlines()
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "interrupted",
+        "command": "config list",
+        "message": "Interrupted",
+    }
 
-
-def test_runtime_error_keeps_format_and_target(tmp_path, monkeypatch, capsys):
     def broken(*args, **kwargs):
-        raise RuntimeError("test failure")
+        raise RuntimeError("boom")
 
     monkeypatch.setattr(cli, "resolve", broken)
-    assert cli.main(["--json", "inspect", str(tmp_path / "deck.pptx")]) == 1
+    assert cli.main(["export", str(tmp_path / "deck.pptx"), "--json"]) == 1
     result = json.loads(capsys.readouterr().out)
-    assert result["status"] == "failed"
-    assert result["source_path"] == str(tmp_path / "deck.pptx")
+    assert result == {
+        "status": "error",
+        "command": "export",
+        "message": "boom",
+        "inputPath": str(tmp_path / "deck.pptx"),
+    }
 
 
-def test_config_init_dry_run_and_output_mode(tmp_path):
-    target = tmp_path / "new" / "config.yaml"
-    text = run_cli("config", "init", "--dry-run", "--output", target, cwd=tmp_path)
-    machine = run_cli("--json", "config", "init", "--dry-run", "--output", target, cwd=tmp_path)
-    assert text.returncode == machine.returncode == 0
-    assert f"path={target}" in text.stdout.splitlines()
-    assert json.loads(machine.stdout)["path"] == str(target)
-    assert not target.exists() and not target.parent.exists()
+def test_config_init_through_the_command_line(tmp_path):
+    target = tmp_path / "config.yaml"
+    created = run_cli("config", "init", "--output", target, cwd=tmp_path)
+    assert created.returncode == 0 and f"configPath={target}" in created.stdout.splitlines()
+    target.write_text("schema_version: '4.0.0'\n", encoding="utf-8")
+    edited = run_cli("config", "init", "--output", target, "--json", cwd=tmp_path)
+    assert edited.returncode == 3 and json.loads(edited.stdout)["status"] == "config-error"
 
 
-def test_quiet_verbose_change_logs_only(tmp_path):
-    normal = run_cli("config", "list", cwd=tmp_path)
-    quiet = run_cli("--quiet", "config", "list", cwd=tmp_path)
-    verbose = run_cli("config", "list", "--verbose", cwd=tmp_path)
-    assert normal.stdout == quiet.stdout == verbose.stdout
-    assert quiet.stderr == ""
+def test_key_value_lines_escape_only_control_characters():
+    lines = list(
+        result_lines(
+            {"path": "C:\\a\\b", "items": [], "nested": {"ok": True, "none": None}, "text": "a\nb"}
+        )
+    )
+    assert lines == [
+        "path=C:\\a\\b",
+        "items=[]",
+        "nested.ok=true",
+        "nested.none=null",
+        "text=a\\nb",
+    ]
 
 
 def test_log_format_color_and_levels(monkeypatch):
-    assert logging.getLevelName(SUCCESS) == "SUCCESS" and logging.INFO < SUCCESS < logging.WARNING
-    for level, color in [
-        (SUCCESS, "\x1b[32m"),
-        (logging.ERROR, "\x1b[31m"),
-        (logging.CRITICAL, "\x1b[31m"),
-    ]:
-        record = logging.LogRecord("test", level, "", 1, "done", (), None)
-        assert ColorFormatter(True).format(record).startswith(color)
-        assert "\x1b" not in ColorFormatter(False).format(record)
     stream = Mock()
     stream.isatty.return_value = False
     assert not supports_color(stream)
-    stream.isatty.return_value = True
+    record = logging.LogRecord("x", SUCCESS, "", 0, "done", (), None)
+    assert ColorFormatter(False).format(record) == "[SUCCESS] done"
+    assert ColorFormatter(True).format(record) == "\x1b[32m[SUCCESS] done\x1b[0m"
+    assert configure(quiet=True).level == logging.ERROR
+    assert configure(verbose=True).level == logging.DEBUG
+    logger = configure(no_color=True)
+    assert logger.level == logging.INFO and not logger.handlers[0].formatter.color
     monkeypatch.setenv("NO_COLOR", "")
+    stream.isatty.return_value = True
     assert not supports_color(stream)
-    monkeypatch.delenv("NO_COLOR")
-    monkeypatch.setenv("TERM", "dumb")
-    assert not supports_color(stream)
-
-
-def test_log_filtering_and_stderr(capsys):
-    logger = configure(quiet=True)
-    logger.info("hidden")
-    logger.error("shown")
-    capture = capsys.readouterr()
-    assert capture.out == "" and "shown" in capture.err and "hidden" not in capture.err
-    logger = configure(verbose=True)
-    logger.debug("detail")
-    assert "[DEBUG] detail" in capsys.readouterr().err
-
-
-def test_cli_profile_selection_and_removed_language_option(deck_path, tmp_path):
-    help_result = run_cli("export", "--help", cwd=tmp_path)
-    assert "--prompt-profile" in help_result.stdout and "--language" not in help_result.stdout
-    output = tmp_path / "english.md"
-    result = run_cli(
-        "export", deck_path, "--output", output, "--prompt-profile", "default-en", cwd=tmp_path
-    )
-    assert result.returncode == 0, result.stderr
-    assert "Extracted content" in output.read_text("utf-8")
-    bad = run_cli("export", deck_path, "--language", "en", cwd=tmp_path)
-    assert bad.returncode == 2
-    removed = run_cli("export", deck_path, "--bridge-profile", "codex-default", cwd=tmp_path)
-    assert removed.returncode == 2
-    assert "--bridge-profile was replaced by --genai-profile" in removed.stderr
