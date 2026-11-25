@@ -191,7 +191,12 @@ def _summary_decision(
         sid = slide.slide_id
         if sid in pending:
             entries.append((slide, pending[sid]))
-        elif sid in plan.records and not plan.stale(sid):
+        elif (
+            sid in plan.records
+            and not plan.stale(sid)
+            # A record whose saved result is gone cannot be summarized or shown.
+            and cached(assets, "slide", plan.records[sid]["key"]) is not None
+        ):
             entries.append((slide, plan.records[sid]["key"]))
     if not entries:
         return {"action": "none"}
@@ -251,10 +256,13 @@ def _generate(
         for slide, key in plan.fresh:
             LOGGER.info("Generating context for slide %d.", slide.number)
             folder = result_dir(assets, "slide", key)
-            progress["aiCalls"] += 1  # counted when the provider is called, even if it fails
-            generator.generate(
-                "slide", plan.payloads[slide.slide_id], images[slide.number], folder, key
-            )
+            try:
+                generator.generate(
+                    "slide", plan.payloads[slide.slide_id], images[slide.number], folder, key
+                )
+            finally:
+                # Counted once the provider was called, even when the call or its output fails.
+                progress["aiCalls"] = generator.calls
             generated += 1
             hit = cached(assets, "slide", key)
             if hit is None:
@@ -274,18 +282,23 @@ def _generate(
         return generated
     key = decision["key"]
     if decision["action"] == "call":
+        if "payload" not in decision:
+            plan.warnings.append("Presentation summary skipped: a saved slide result is missing")
+            return generated
         LOGGER.info(
             "Generating the presentation summary from %d slide(s).", len(decision["slides"])
         )
-        progress["aiCalls"] += 1
-        generator.generate(
-            "deck",
-            decision["payload"],
-            None,
-            result_dir(assets, "deck", key),
-            key,
-            allowed_slides={s.number for s in decision["slides"]},
-        )
+        try:
+            generator.generate(
+                "deck",
+                decision["payload"],
+                None,
+                result_dir(assets, "deck", key),
+                key,
+                allowed_slides={s.number for s in decision["slides"]},
+            )
+        finally:
+            progress["aiCalls"] = generator.calls
     hit = cached(assets, "deck", key)
     if hit is None:
         raise NoteError("Saved AI summary cannot be read back")
@@ -322,7 +335,11 @@ def process(
         select(deck, included, options.slides, options.sections) if options.context else included
     )
     assets = assets_dir(note)
-    identity = (target.identity.get("sourceId") or os.path.normcase(str(source))).lower()
+    identity = (
+        _note_identity(target.identity["sourceId"])
+        if target.proxy
+        else os.path.normcase(str(source))
+    )
     state = load_state(assets)
     if state and state.get("identity") != identity:
         # Results saved for another presentation must never appear in this note.
@@ -343,7 +360,7 @@ def process(
             )
     if existing is not None and target.proxy:
         old_meta, before, old_body, after = split_note(existing)
-        if str(old_meta.get("sourceId", "")).lower() != identity:
+        if _note_identity(str(old_meta.get("sourceId", ""))) != identity:
             raise NoteError("The existing note belongs to another presentation; it was not changed")
 
     payloads = {
@@ -518,6 +535,12 @@ def process(
         return finish()
 
 
+def _note_identity(source_id: str) -> str:
+    """Source IDs are exact; the file path after `:` follows Windows and ignores case."""
+    root, _, relative = source_id.partition(":")
+    return f"{root}:{relative.lower()}"
+
+
 def file_changed(note: Path, existing: str | None) -> bool:
     return (note.read_text("utf-8-sig") if note.exists() else None) != existing
 
@@ -552,7 +575,8 @@ def summarize(command: str, rows: list[dict[str, Any]], options: Options) -> dic
         "status": "error" if errors else "success",
         "command": command,
         "dryRun": options.dry_run,
-        "files": len(rows) - counts["missing-source"],
+        # Rows that stand for a presentation; a source that could not be read has none.
+        "files": sum("presentationPath" in row or "inputPath" in row for row in rows),
         "changed": sum(counts[status] for status in CHANGED),
         "errors": errors,
         "statusCounts": dict(sorted(counts.items())),
@@ -592,7 +616,8 @@ def export(
     path: Path, output: Path | None, config: dict[str, Any], options: Options
 ) -> dict[str, Any]:
     """Write `<file>.md` beside each presentation, or one file to --output."""
-    path = path.expanduser().resolve()
+    # Keep paths as the user wrote them: folders reached through links stay as given.
+    path = Path(os.path.abspath(path.expanduser()))
     if path.is_dir():
         if output is not None:
             raise ConfigError("--output cannot be used when the input is a folder")
@@ -614,7 +639,7 @@ def export(
     rows = []
     for source in sources:
         note = (
-            output.expanduser().resolve()
+            Path(os.path.abspath(output.expanduser()))
             if output is not None
             else source.with_name(source.name + ".md")
         )
@@ -630,7 +655,7 @@ def export(
 
 
 def list_slides(path: Path, config: dict[str, Any]) -> dict[str, Any]:
-    path = path.expanduser().resolve()
+    path = Path(os.path.abspath(path.expanduser()))
     deck = read_deck(path, config["extraction"])
     return {
         "status": "success",

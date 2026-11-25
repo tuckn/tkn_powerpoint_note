@@ -188,7 +188,21 @@ def test_all_sources_reports_an_unreachable_source_and_continues(source, tmp_pat
     assert pulled.returncode == 1, pulled.stderr
     result = json.loads(pulled.stdout)
     assert result["statusCounts"] == {"created": 1, "error": 1}
+    assert (result["files"], result["errors"]) == (1, 1)
     failed = next(r for r in result["results"] if r["status"] == "error")
     assert failed["sourceRoot"] == "absent" and "does not exist" in failed["message"]
     single = run_cli("pull", "--source", "absent", "--config", config, "--json", cwd=tmp_path)
     assert single.returncode == 3
+
+
+def test_settings_shared_by_all_sources_fail_as_configuration_errors(
+    source, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    args = ["pull", "--all-sources", "--config", str(source["config_path"]), "--json"]
+    assert cli.main([*args, "--context", "--generator", "unknown"]) == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "config-error"
+    assert cli.main([*args, "--dry-run"]) == 0
+    assert json.loads(capsys.readouterr().out)["files"] == 1

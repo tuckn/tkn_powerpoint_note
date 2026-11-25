@@ -482,3 +482,52 @@ def test_export_rejects_other_formats_and_outputs_before_processing(source, tmp_
     deck = make_deck(tmp_path / "talk.pptx", SLIDES)
     with pytest.raises(pipeline.ConfigError, match="must be a .md file"):
         export(deck, tmp_path / "talk.txt", config, Options())
+
+
+def junction(link: Path, target: Path) -> None:
+    _winapi = pytest.importorskip("_winapi")
+    _winapi.CreateJunction(str(target), str(link))
+
+
+def test_cleanup_never_reaches_through_a_junction(source, ai, tmp_path):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source, context=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "response.json").write_text("{}")
+    junction(assets_dir(note_of(source)) / "slides" / "0123456789abcdef", elsewhere)
+    make_deck(source["decks"] / "deck.pptx", SLIDES[:2])
+    assert one(source, context=True)["status"] == "updated"
+    assert (elsewhere / "response.json").is_file()
+
+
+def test_a_presentation_named_through_another_path_to_the_folder_is_found(source, tmp_path):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    alias = tmp_path / "alias"
+    junction(alias, source["decks"])
+    assert [r["status"] for r in run(source, file=alias / "deck.pptx")] == ["created"]
+    config = source["load"]()
+    config["sources"]["demo"]["presentations"]["dir"] = str(alias)
+    rows = pull("demo", config, Options(), source["decks"] / "deck.pptx")
+    assert [r["status"] for r in rows] == ["updated"]
+    assert rows[0]["presentationPath"] == str(alias / "deck.pptx")
+
+
+def test_source_ids_that_differ_only_in_case_do_not_share_a_note(source):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    config = source["load"]()
+    config["sources"]["Demo"] = config["sources"]["demo"]
+    assert pull("demo", config, Options())[0]["status"] == "created"
+    row = pull("Demo", config, Options())[0]
+    assert row["status"] == "error" and "another presentation" in row["message"]
+
+
+def test_a_missing_saved_result_does_not_break_the_summary(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source, context=True)
+    folder = assets_dir(note_of(source)) / "slides"
+    next(folder.iterdir()).joinpath("response.json").unlink()
+    make_deck(source["decks"] / "deck.pptx", [SLIDES[2], SLIDES[1], SLIDES[0]])
+    row = one(source, context=True, overrides={"generation": {"limits": {"max_input_chars": 100}}})
+    assert row["status"] == "updated" and len(row["skippedSlides"]) == 1
+    assert row["aiCalls"] == 0 and "summary skipped" in row["warnings"][0]

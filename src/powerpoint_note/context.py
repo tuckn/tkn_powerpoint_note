@@ -93,6 +93,7 @@ class Generator:
                 f"check genai_profiles.{self.profile_name}"
             ) from exc
         dumped = plan.model_dump(mode="json")
+        self.calls = 0  # provider calls actually made
         self.plan = {key: dumped.get(key) for key in PLAN_FIELDS}
 
     def key(self, stage: str, content: str) -> str:
@@ -153,6 +154,7 @@ class Generator:
         data: Any = None
         try:
             with self.bridge.Runtime(self.profile, profile_name=self.profile_name) as runtime:
+                self.calls += 1
                 result = runtime.generate(request)
             data = result.data
             journal["record"] = result.record.model_dump(mode="json")

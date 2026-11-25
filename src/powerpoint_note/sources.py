@@ -53,12 +53,23 @@ def resolve_file(spec: dict[str, Any], value: Path, known: list[str]) -> str:
     """One presentation named on the command line, relative to or inside presentations.dir."""
     root = Path(spec["presentations"]["dir"])
     path = value.expanduser()
-    # Compare the paths as written, like the folder scan: links inside the folder are followed.
     path = Path(os.path.abspath(path if path.is_absolute() else root / path))
-    try:
-        relative = path.relative_to(Path(os.path.abspath(root))).as_posix()
-    except ValueError as exc:
-        raise ConfigError(f"Presentation is outside presentations.dir: {path}") from exc
+    # Compare as written first; then through the real folders, so another name for the same
+    # folder (a link or junction on the way) also matches. The file itself is never resolved:
+    # a link placed inside the folder counts as a file of the folder, as in the folder scan.
+    candidates = (
+        (path, Path(os.path.abspath(root))),
+        (path.parent.resolve() / path.name, root.resolve()),
+    )
+    relative = None
+    for candidate, base in candidates:
+        try:
+            relative = candidate.relative_to(base).as_posix()
+            break
+        except ValueError:
+            continue
+    if relative is None:
+        raise ConfigError(f"Presentation is outside presentations.dir: {path}")
     match = next((item for item in known if item.lower() == relative.lower()), None)
     if match is None:
         raise ConfigError(

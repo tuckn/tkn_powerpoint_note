@@ -243,7 +243,8 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return result, EXIT_FAILED if result["errors"] else EXIT_OK
     if args.presentation is not None and args.all_sources:
         raise ArgumentError("A presentation path requires --source, not --all-sources")
-    config, _ = resolve(explicit)
+    # Settings shared by every source fail here, as configuration errors.
+    config, _ = resolve(explicit, overrides(args), generator=args.generator)
     sources = sorted(config["sources"]) if args.all_sources else [args.source]
     if not sources:
         raise ConfigError("No sources are configured; add one under sources in config.yaml")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -61,12 +62,20 @@ def cached(folder: Path, stage: str, key: str) -> dict[str, Any] | None:
         return None
 
 
+def _is_link(path: Path) -> bool:
+    """Symbolic links and Windows junctions: what is behind them is never ours to delete."""
+    attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    return path.is_symlink() or bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
 def _generated(folder: Path) -> bool:
     """A result folder this tool wrote: a key for a name and nothing but its own files inside."""
-    if folder.is_symlink() or not folder.is_dir() or not KEY_NAME.fullmatch(folder.name):
+    if not KEY_NAME.fullmatch(folder.name) or _is_link(folder) or not folder.is_dir():
         return False
     return all(
-        child.is_file() and (child.name in RESULT_FILES or child.name.endswith(".tmp"))
+        not _is_link(child)
+        and child.is_file()
+        and (child.name in RESULT_FILES or child.name.endswith(".tmp"))
         for child in folder.iterdir()
     )
 
@@ -76,18 +85,22 @@ def prune(folder: Path, keep: set[Path]) -> int:
     removed = 0
     for group in ("slides", "deck"):
         parent = folder / group
-        if parent.is_symlink() or not parent.is_dir():
-            continue
-        for child in parent.iterdir():
-            if child in keep or not _generated(child):
+        try:
+            if not parent.is_dir() or _is_link(folder) or _is_link(parent):
                 continue
+            children = list(parent.iterdir())
+        except OSError:
+            continue
+        for child in children:
             try:
+                if child in keep or not _generated(child):
+                    continue
                 for item in child.iterdir():
                     item.unlink()
                 child.rmdir()
                 removed += 1
             except OSError:
-                continue  # in use; a later run removes it
+                continue  # unreadable or in use: cleaning up never fails a finished run
     return removed
 
 
