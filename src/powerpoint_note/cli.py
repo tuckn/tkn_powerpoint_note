@@ -249,8 +249,15 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         raise ConfigError("No sources are configured; add one under sources in config.yaml")
     rows: list[dict[str, Any]] = []
     for source in sources:
-        config, _ = resolve(explicit, overrides(args), generator=args.generator, source=source)
-        rows.extend(pull(source, config, options, args.presentation))
+        try:
+            config, _ = resolve(explicit, overrides(args), generator=args.generator, source=source)
+            rows.extend(pull(source, config, options, args.presentation))
+        except ConfigError as exc:
+            if not args.all_sources:
+                raise
+            # One unreachable source must not hide what the others did.
+            logging.getLogger("powerpoint_note").error("%s: %s", source, exc)
+            rows.append({"status": "error", "sourceRoot": source, "message": str(exc)})
     result = {**summarize("pull", rows, options), "sources": sources}
     return result, EXIT_FAILED if result["errors"] else EXIT_OK
 

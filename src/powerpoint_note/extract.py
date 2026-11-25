@@ -9,7 +9,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
-from xml.etree.ElementTree import Element, tostring
+from xml.etree.ElementTree import Element, ParseError, tostring
 from zipfile import BadZipFile, ZipFile
 
 from defusedxml.ElementTree import fromstring
@@ -633,7 +633,7 @@ def read_deck(path: Path, settings: dict[str, Any]) -> Deck:
         return deck
     except NoteError:
         raise
-    except (BadZipFile, KeyError, ValueError, TypeError, OSError) as exc:
+    except (BadZipFile, ParseError, KeyError, ValueError, TypeError, OSError) as exc:
         raise NoteError(f"Cannot parse PowerPoint package ({type(exc).__name__})") from exc
     finally:
         if pkg is not None:

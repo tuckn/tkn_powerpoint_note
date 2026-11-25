@@ -172,3 +172,23 @@ def test_log_format_color_and_levels(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "")
     stream.isatty.return_value = True
     assert not supports_color(stream)
+
+
+def test_all_sources_reports_an_unreachable_source_and_continues(source, tmp_path):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    config = source["config_path"]
+    extra = (
+        "  absent:\n    presentations:\n"
+        f"      dir: '{tmp_path / 'nowhere'}'\n"
+        f"    notes:\n      dir: '{tmp_path / 'notes2'}'\n"
+    )
+    text = config.read_text("utf-8").replace("genai_profiles:", extra + "genai_profiles:")
+    config.write_text(text, encoding="utf-8")
+    pulled = run_cli("pull", "--all-sources", "--config", config, "--json", cwd=tmp_path)
+    assert pulled.returncode == 1, pulled.stderr
+    result = json.loads(pulled.stdout)
+    assert result["statusCounts"] == {"created": 1, "error": 1}
+    failed = next(r for r in result["results"] if r["status"] == "error")
+    assert failed["sourceRoot"] == "absent" and "does not exist" in failed["message"]
+    single = run_cli("pull", "--source", "absent", "--config", config, "--json", cwd=tmp_path)
+    assert single.returncode == 3

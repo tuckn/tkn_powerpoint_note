@@ -38,6 +38,9 @@ def atomic_write(path: Path, text: str, *, overwrite: bool = True) -> None:
             os.fsync(stream.fileno())
         if overwrite:
             temporary.replace(path)
+        elif os.name == "nt":
+            # On Windows a rename never replaces an existing file, on any file system.
+            os.rename(temporary, path)
         else:
             os.link(temporary, path)
     finally:

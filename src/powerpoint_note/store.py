@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -18,6 +18,8 @@ from .models import NoteError
 STATE_VERSION = 1
 STATE_FILE = "state.json"
 KEY_LENGTH = 16
+KEY_NAME = re.compile(r"[0-9a-f]{16}")
+RESULT_FILES = {"request.json", "response.json", "usage.json", "rejected.json", "slide.png"}
 
 
 def assets_dir(note: Path) -> Path:
@@ -59,17 +61,33 @@ def cached(folder: Path, stage: str, key: str) -> dict[str, Any] | None:
         return None
 
 
+def _generated(folder: Path) -> bool:
+    """A result folder this tool wrote: a key for a name and nothing but its own files inside."""
+    if folder.is_symlink() or not folder.is_dir() or not KEY_NAME.fullmatch(folder.name):
+        return False
+    return all(
+        child.is_file() and (child.name in RESULT_FILES or child.name.endswith(".tmp"))
+        for child in folder.iterdir()
+    )
+
+
 def prune(folder: Path, keep: set[Path]) -> int:
-    """Remove saved results that the note no longer refers to."""
+    """Remove saved results that the note no longer refers to. Anything else is left alone."""
     removed = 0
     for group in ("slides", "deck"):
         parent = folder / group
-        if not parent.is_dir():
+        if parent.is_symlink() or not parent.is_dir():
             continue
         for child in parent.iterdir():
-            if child.is_dir() and child not in keep:
-                shutil.rmtree(child, ignore_errors=True)
+            if child in keep or not _generated(child):
+                continue
+            try:
+                for item in child.iterdir():
+                    item.unlink()
+                child.rmdir()
                 removed += 1
+            except OSError:
+                continue  # in use; a later run removes it
     return removed
 
 

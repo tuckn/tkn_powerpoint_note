@@ -41,7 +41,7 @@
 | `message` | 失敗・保護・要確認の理由 |
 | `slides` | ノートに含めたスライドの数 |
 | `contextStatus` / `staleSlides` | ノートの AI の説明の状態と、内容が変わったスライド |
-| `aiCalls` / `plannedAiCalls` | この対象の呼び出し回数と、見積もった回数 |
+| `aiCalls` / `plannedAiCalls` | この対象の呼び出し回数と、見積もった回数。`aiCalls` は、失敗した対象でも、失敗までに行った呼び出しを数えます。 |
 | `generatedSlides` / `reusedSlides` | AI で生成したスライドの数と、保存済みの結果を再利用したスライドの数 |
 | `skippedSlides` | 説明を作らなかったスライドと理由（`<番号>: <理由>` の一覧） |
 | `warnings` | 資料の要約を作らなかった理由など |
@@ -55,7 +55,7 @@
 | `exported` / `would-export` | `export` で書き出しました・書き出す予定です。 | なし |
 | `missing-source` | 代理ノートに対応する PowerPoint が見つかりません。ノートはそのままです。 | なし |
 | `protected` | ノートの生成部分が手で直されているため、更新しませんでした。 | 1 |
-| `error` / `export-error` | 読み取り・生成・書き込みに失敗しました。 | 1 |
+| `error` / `export-error` | 読み取り・生成・書き込みに失敗しました。`--all-sources` で、入力フォルダが見つからないなど source 全体を処理できなかった場合は、`sourceRoot` と `message` だけの行になり、ほかの source の処理は続けます。 | 1 |
 
 ## 終了コード
 

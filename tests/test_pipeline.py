@@ -157,6 +157,20 @@ def test_inserting_a_slide_only_explains_the_new_slide(source, ai):
     assert split_note(note_of(source).read_text("utf-8"))[0]["contextAnalyzedSlides"] == "1-4"
 
 
+def test_identical_slides_share_one_ai_call(source, ai):
+    slides = [(256, "Divider", "same"), (257, "One", "body"), (258, "Divider", "same")]
+    make_deck(source["decks"] / "deck.pptx", slides)
+    assert one(source, context=True, dry_run=True)["plannedAiCalls"] == 3
+    row = one(source, context=True)
+    assert (row["aiCalls"], row["generatedSlides"], row["reusedSlides"]) == (3, 2, 1)
+    assert (row["contextStatus"], len(ai.slide_calls), sorted(ai.rendered)) == (
+        "current",
+        2,
+        [1, 2],
+    )
+    assert note_of(source).read_text("utf-8").count("Explained") == 3
+
+
 def test_plain_pull_keeps_explanations_and_marks_changed_slides_stale(source, ai):
     make_deck(source["decks"] / "deck.pptx", SLIDES)
     one(source, context=True)
@@ -169,16 +183,6 @@ def test_plain_pull_keeps_explanations_and_marks_changed_slides_stale(source, ai
     refreshed = one(source, context=True)
     assert (refreshed["generatedSlides"], refreshed["contextStatus"]) == (1, "current")
     assert "[!WARNING]" not in note_of(source).read_text("utf-8")
-
-
-def test_selected_slides_accumulate_explanations(source, ai):
-    make_deck(source["decks"] / "deck.pptx", SLIDES)
-    first = one(source, context=True, slides="1")
-    assert (first["generatedSlides"], first["contextStatus"]) == (1, "partial")
-    second = one(source, context=True, slides="3")
-    assert (second["generatedSlides"], second["contextStatus"]) == (1, "partial")
-    metadata = split_note(note_of(source).read_text("utf-8"))[0]
-    assert metadata["contextAnalyzedSlides"] == "1,3" and metadata["contextOmittedSlides"] == "2"
 
 
 def test_a_failed_run_keeps_the_note_and_resumes_from_finished_slides(source, ai):
@@ -316,3 +320,165 @@ def test_export_a_folder_and_an_explicit_output(source, tmp_path):
     assert target.is_file()
     with pytest.raises(pipeline.ConfigError):
         export(tmp_path / "absent.pptx", None, config, Options())
+
+
+def test_summary_never_sends_explanations_outside_the_selection(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    first = one(source, context=True, slides="1")
+    assert (first["aiCalls"], first["contextStatus"], ai.deck_calls) == (2, "partial", 1)
+    planned = one(source, context=True, slides="3", dry_run=True)
+    assert planned["plannedAiCalls"] == 1
+    second = one(source, context=True, slides="3")
+    assert (second["aiCalls"], second["generatedSlides"], ai.deck_calls) == (1, 1, 1)
+    assert second["contextStatus"] == "stale" and "outside --slides" in second["warnings"][0]
+    text = note_of(source).read_text("utf-8")
+    assert "Deck summary" in text and "この要約の生成後に" in text
+    whole = one(source, context=True)
+    assert (whole["aiCalls"], whole["generatedSlides"], ai.deck_calls) == (2, 1, 2)
+    assert whole["contextStatus"] == "current" and not whole["warnings"]
+    assert "この要約の生成後に" not in note_of(source).read_text("utf-8")
+
+
+def test_moving_slides_marks_the_kept_summary_as_out_of_date(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source, context=True)
+    make_deck(source["decks"] / "deck.pptx", [SLIDES[2], SLIDES[0], SLIDES[1]])
+    row = one(source)
+    assert (row["contextStatus"], row["staleSlides"]) == ("stale", "")
+    text = note_of(source).read_text("utf-8")
+    assert "この要約の生成後に" in text and text.count("Explained") == 3
+    refreshed = one(source, context=True)
+    assert (refreshed["aiCalls"], refreshed["generatedSlides"]) == (1, 0)
+    assert refreshed["contextStatus"] == "current"
+
+
+def test_only_result_folders_this_tool_wrote_are_removed(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source, context=True)
+    slides = assets_dir(note_of(source)) / "slides"
+    foreign = slides / "my-own-folder"
+    foreign.mkdir()
+    (foreign / "keep.txt").write_text("mine")
+    mixed = slides / "0123456789abcdef"
+    mixed.mkdir()
+    (mixed / "usage.json").write_text("{}")
+    (mixed / "original.pptx").write_text("not ours")
+    stale = slides / "fedcba9876543210"
+    stale.mkdir()
+    (stale / "usage.json").write_text("{}")
+    make_deck(source["decks"] / "deck.pptx", SLIDES[:2])
+    one(source, context=True)
+    assert (foreign / "keep.txt").is_file() and (mixed / "original.pptx").is_file()
+    assert not stale.exists()
+    assert len([p for p in slides.iterdir() if p.is_dir()]) == 4
+
+
+def test_export_never_replaces_a_proxy_note_or_a_foreign_file(source, tmp_path):
+    deck = make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source)
+    note = note_of(source)
+    before = note.read_text("utf-8")
+    config = source["load"]()
+    result = export(deck, note, config, Options(force=True))
+    assert result["results"][0]["status"] == "export-error"
+    assert "not written by export" in result["results"][0]["message"]
+    assert note.read_text("utf-8") == before
+    plain = tmp_path / "mine.md"
+    plain.write_text("# my own notes\n", encoding="utf-8")
+    assert export(deck, plain, config, Options(force=True))["errors"] == 1
+    assert plain.read_text("utf-8") == "# my own notes\n"
+
+
+def test_results_saved_for_another_presentation_are_not_inherited(source, ai, tmp_path):
+    config = source["load"]()
+    shared = tmp_path / "shared.md"
+    first = make_deck(tmp_path / "a.pptx", SLIDES)
+    assert export(first, shared, config, Options(context=True))["aiCalls"] == 4
+    other = [(256, "Other", "unrelated"), (257, "Deck", "content")]
+    second = make_deck(tmp_path / "b.pptx", other)
+    result = export(second, shared, config, Options(force=True))
+    row = result["results"][0]
+    assert (row["status"], row["contextStatus"]) == ("exported", "not-generated")
+    text = shared.read_text("utf-8")
+    assert "Explained" not in text and "Deck summary" not in text and "unrelated" in text
+
+
+def test_a_presentation_with_broken_xml_fails_alone(source):
+    make_deck(source["decks"] / "a.pptx", SLIDES)
+    write_deck(source["decks"] / "b.pptx", {"ppt/presentation.xml": "<p:presentation"})
+    make_deck(source["decks"] / "c.pptx", SLIDES)
+    rows = run(source)
+    assert [r["status"] for r in rows] == ["created", "error", "created"]
+    assert "Cannot parse" in rows[1]["message"]
+
+
+def test_a_case_only_rename_keeps_the_same_note(source):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source)
+    (source["decks"] / "deck.pptx").rename(source["decks"] / "Deck.pptx")
+    row = one(source)
+    assert row["status"] in {"updated", "unchanged"}, row
+    notes = [p.name.lower() for p in source["notes"].glob("*.md")]
+    assert notes == ["deck.pptx.md"]
+
+
+def test_excluded_presentations_are_not_reported_as_missing(source):
+    make_deck(source["decks"] / "a.pptx", SLIDES)
+    (source["decks"] / "img").mkdir()
+    make_deck(source["decks"] / "img" / "b.pptx", SLIDES)
+    assert sorted(r["status"] for r in run(source)) == ["created", "created"]
+    config = source["load"]()
+    config["sources"]["demo"]["presentations"]["ignore"] = ["a.pptx"]
+    rows = pull("demo", config, Options())
+    assert {r["sourcePath"]: r["status"] for r in rows} == {"img/b.pptx": "unchanged"}
+    (source["decks"] / "img" / "b.pptx").unlink()
+    rows = pull("demo", config, Options())
+    assert {r["sourcePath"]: r["status"] for r in rows} == {"img/b.pptx": "missing-source"}
+
+
+def test_unusable_document_dates_stop_before_any_ai_call(source, ai):
+    core = (
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/'
+        'core-properties" xmlns:dcterms="http://purl.org/dc/terms/">'
+        "<dcterms:created>2026-01-01T00:00:00</dcterms:created></cp:coreProperties>"
+    )
+    write_deck(source["decks"] / "deck.pptx", {"docProps/core.xml": core})
+    row = one(source, context=True, dry_run=True)
+    assert row["status"] == "error" and "no timezone" in row["message"]
+    assert one(source, context=True)["status"] == "error"
+    assert not ai.slide_calls and not ai.rendered
+
+
+def test_calls_made_before_a_failure_are_counted(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    ai.invalid_on = "third body"
+    row = one(source, context=True)
+    assert (row["status"], row["aiCalls"]) == ("error", 3)
+    assert summarize("pull", [row], Options())["aiCalls"] == 3
+
+
+def test_a_summary_known_to_be_too_long_is_not_planned(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(
+        source,
+        context=True,
+        slides="1-3",
+        overrides={"generation": {"limits": {"max_input_chars": 100000}}},
+    )
+    make_deck(source["decks"] / "deck.pptx", [SLIDES[1], SLIDES[0], SLIDES[2]])
+    tiny = {"generation": {"limits": {"max_input_chars": 150}}}
+    planned = one(source, context=True, dry_run=True, overrides=tiny)
+    assert planned["plannedAiCalls"] == 0 and "summary skipped" in planned["warnings"][0]
+    row = one(source, context=True, overrides=tiny)
+    assert row["aiCalls"] == 0 and row["contextStatus"] == "stale"
+
+
+def test_export_rejects_other_formats_and_outputs_before_processing(source, tmp_path):
+    config = source["load"]()
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_text("x")
+    with pytest.raises(pipeline.ConfigError, match="pptx or .pptm"):
+        export(pdf, None, config, Options())
+    deck = make_deck(tmp_path / "talk.pptx", SLIDES)
+    with pytest.raises(pipeline.ConfigError, match="must be a .md file"):
+        export(deck, tmp_path / "talk.txt", config, Options())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -52,9 +53,10 @@ def resolve_file(spec: dict[str, Any], value: Path, known: list[str]) -> str:
     """One presentation named on the command line, relative to or inside presentations.dir."""
     root = Path(spec["presentations"]["dir"])
     path = value.expanduser()
-    path = path.resolve() if path.is_absolute() else (root / path).resolve()
+    # Compare the paths as written, like the folder scan: links inside the folder are followed.
+    path = Path(os.path.abspath(path if path.is_absolute() else root / path))
     try:
-        relative = path.relative_to(root.resolve()).as_posix()
+        relative = path.relative_to(Path(os.path.abspath(root))).as_posix()
     except ValueError as exc:
         raise ConfigError(f"Presentation is outside presentations.dir: {path}") from exc
     match = next((item for item in known if item.lower() == relative.lower()), None)
@@ -76,9 +78,8 @@ def missing_sources(spec: dict[str, Any], source_id: str, known: list[str]) -> l
     rows: list[dict[str, Any]] = []
     if not root.is_dir():
         return rows
+    sources = Path(spec["presentations"]["dir"])
     for note in sorted(root.rglob("*.md")):
-        if "img" in note.relative_to(root).parts[:-1]:
-            continue
         try:
             metadata, _ = read_frontmatter(note.read_text("utf-8-sig"))
         except (NoteError, OSError, UnicodeError):
@@ -89,6 +90,8 @@ def missing_sources(spec: dict[str, Any], source_id: str, known: list[str]) -> l
             and metadata.get("sourceRoot") == source_id
             and isinstance(name, str)
             and name.lower() not in present
+            # Excluded by recursive/include/ignore is not the same as gone.
+            and not (sources / name).is_file()
         ):
             rows.append(
                 {

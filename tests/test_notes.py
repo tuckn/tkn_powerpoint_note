@@ -244,11 +244,45 @@ def test_evidence_drops_empty_values_and_keys_ignore_positions(tmp_path, config)
         ],
     }
     text = payload_text(payload)
-    assert " " not in text.replace("One", "") and content_key(slide, text, 2400) != content_key(
-        slide, text, 1200
-    )
+    assert " " not in text.replace("One", "")
+    before = content_key(slide, text, 2400, deck)
+    assert content_key(slide, text, 1200, deck) != before
     slide.number, slide.page_number = 9, 99
     assert payload_text(slide_payload(slide, deck, "exclude")) == text
+    assert content_key(slide, text, 2400, deck) == before
+    deck.height = 563  # the same slide parts drawn on another slide size
+    assert content_key(slide, text, 2400, deck) != before
+
+
+def test_scatter_series_keep_their_own_points():
+    slide = Slide(1, "256", "p", False, 1)
+    series = [
+        {"name": "A", "x": ["1", "2"], "y": ["10", "20"]},
+        {"name": "B", "x": ["5"], "y": ["50"], "size": ["3"]},
+    ]
+    chart = Shape(
+        "8",
+        "chart",
+        "C",
+        bbox=[0, 0, 5, 5],
+        location="inside",
+        details={"chart": {"type": "scatterChart", "title": "", "series": series}},
+    )
+    lines = extracted_text([chart], slide, DECK, WORDS).splitlines()
+    assert lines[0] == "- グラフ（scatterChart）"
+    first, second = lines.index("  - A"), lines.index("  - B")
+    assert lines[first + 2 : first + 6] == [
+        "| x | y |",
+        "| --- | --- |",
+        "| 1 | 10 |",
+        "| 2 | 20 |",
+    ]
+    assert lines[second + 2 : second + 5] == [
+        "| x | y | size |",
+        "| --- | --- | --- |",
+        "| 5 | 50 | 3 |",
+    ]
+    assert "| 5 | 10 |" not in lines
 
 
 def test_sources_find_presentations_and_map_them_to_notes(tmp_path):

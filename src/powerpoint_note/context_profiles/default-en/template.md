@@ -13,6 +13,7 @@ labels:
   location_partial: "partly off slide"
   location_unknown: "position unknown"
   stale: "The slide changed after this explanation was generated. Run with `--context` to update it."
+  stale_summary: "Slides changed or moved after this summary was generated; slide numbers may be off. Run with `--context` to update it."
   skipped: "No explanation was generated for this slide"
 ---
 #### Slide context (AI generated)

@@ -53,6 +53,7 @@ LABELS = {
     "location_partial",
     "location_unknown",
     "stale",
+    "stale_summary",
     "skipped",
 }
 TOKEN = re.compile(r"{{\s*([#/]?)([a-z][a-z0-9_]*)\s*}}")

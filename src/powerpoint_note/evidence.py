@@ -9,7 +9,7 @@ from .io import digest
 from .models import Deck, Shape, Slide
 
 # Bump when the evidence sent to AI changes shape; existing explanations are then regenerated.
-EVIDENCE_CONTRACT = "2"
+EVIDENCE_CONTRACT = "3"
 
 
 def _box(shape: Shape, deck: Deck) -> list[int] | None:
@@ -75,7 +75,7 @@ def payload_text(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def content_key(slide: Slide, payload: str, image_width: int) -> str:
+def content_key(slide: Slide, payload: str, image_width: int, deck: Deck) -> str:
     """Identity of what AI would see for a slide: its drawing, its evidence and the image size."""
     return digest(
         payload_text(
@@ -84,6 +84,8 @@ def content_key(slide: Slide, payload: str, image_width: int) -> str:
                 "fingerprint": slide.fingerprint,
                 "payload": digest(payload.encode("utf-8")),
                 "image_width": image_width,
+                # The slide size shapes the picture even when no slide part changes.
+                "slide_size": [deck.width, deck.height],
             }
         ).encode("utf-8")
     )

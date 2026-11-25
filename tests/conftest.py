@@ -176,6 +176,7 @@ class FakeAI:
         self.rendered: list[int] = []
         self.fail_on: str | None = None
         self.invalid = False
+        self.invalid_on: str | None = None
 
     def generate(self, request: object) -> object:
         from types import SimpleNamespace
@@ -186,7 +187,7 @@ class FakeAI:
                 raise RuntimeError("provider unavailable")
             self.slide_calls.append(prompt)
             data: dict = {"summary": "Explained", "sections": [], "uncertainties": []}
-            if self.invalid:
+            if self.invalid or (self.invalid_on and self.invalid_on in prompt):
                 data = {"summary": ""}
         else:
             import json

@@ -76,30 +76,49 @@ def ordered(shapes: list[Shape], height: int) -> list[Shape]:
     return [shape for _, shape in sorted(enumerate(shapes), key=key)]
 
 
-def chart_markdown(chart: dict[str, Any], words: dict[str, str]) -> list[str]:
-    title = inline(chart.get("title", ""))
-    kind = chart.get("type", "")
-    label = words["chart"] + (f"（{kind}）" if kind else "") + (f": {title}" if title else "")
-    series = [s for s in chart.get("series", []) if s.get("values") or s.get("y")]
-    output = ["- " + label]
-    if not series:
-        return output
-    categories = next((s.get("categories") or s.get("x") for s in series if s), None) or []
-    rows = max(len(s.get("values") or s.get("y") or []) for s in series)
-    header = [""] + [
-        cell(s.get("name", "")) or f"{words['column']} {i}" for i, s in enumerate(series, 1)
-    ]
-    output += [
+def _table(header: list[str], rows: list[list[str]]) -> list[str]:
+    return [
         "",
         "| " + " | ".join(header) + " |",
         "| " + " | ".join(["---"] * len(header)) + " |",
+        *("| " + " | ".join(row) + " |" for row in rows),
+        "",
     ]
-    for index in range(rows):
-        values = [(s.get("values") or s.get("y") or []) for s in series]
-        row = [cell(categories[index]) if index < len(categories) else ""]
-        row += [cell(v[index]) if index < len(v) else "" for v in values]
-        output.append("| " + " | ".join(row) + " |")
-    output.append("")
+
+
+def chart_markdown(chart: dict[str, Any], words: dict[str, str]) -> list[str]:
+    """Cached chart values. Series that do not share one category axis get their own tables."""
+    title = inline(chart.get("title", ""))
+    kind = chart.get("type", "")
+    label = words["chart"] + (f"（{kind}）" if kind else "") + (f": {title}" if title else "")
+    output = ["- " + label]
+    series = [s for s in chart.get("series", []) if any(s.get(k) for k in ("values", "x", "y"))]
+    if not series:
+        return output
+
+    def name(entry: dict[str, Any], index: int) -> str:
+        return cell(entry.get("name", "")) or f"{words['column']} {index}"
+
+    categories = [s.get("categories") or [] for s in series]
+    shared = all("values" in s and "x" not in s and "y" not in s for s in series) and all(
+        c == categories[0] for c in categories
+    )
+    if shared:
+        count = max(len(s["values"]) for s in series)
+        rows = [
+            [cell(categories[0][i]) if i < len(categories[0]) else ""]
+            + [cell(s["values"][i]) if i < len(s["values"]) else "" for s in series]
+            for i in range(count)
+        ]
+        return output + _table([""] + [name(s, i) for i, s in enumerate(series, 1)], rows)
+    # Scatter and bubble points, or category charts whose series differ: one table per series.
+    for index, entry in enumerate(series, 1):
+        columns = [k for k in ("categories", "x", "y", "values", "size") if entry.get(k)]
+        count = max(len(entry[k]) for k in columns)
+        rows = [
+            [cell(entry[k][i]) if i < len(entry[k]) else "" for k in columns] for i in range(count)
+        ]
+        output += ["  - " + name(entry, index)] + _table(columns, rows)
     return output
 
 
@@ -197,6 +216,7 @@ def render_body(
     contexts: dict[str, dict[str, Any]],
     summary: dict[str, Any] | None,
     skipped: dict[str, str],
+    summary_stale: bool = False,
 ) -> str:
     """The generated part of a note. `contexts` maps slide IDs to data, image link and staleness."""
     words = profile.labels
@@ -209,7 +229,11 @@ def render_body(
         overview = profile.render(
             "deck",
             {
-                "summary": summary["summary"],
+                # Slide numbers in an outdated summary may point at other slides by now.
+                "summary": (
+                    f"> [!WARNING]\n> {words['stale_summary']}\n\n" if summary_stale else ""
+                )
+                + summary["summary"],
                 "key_points": "\n".join(points),
                 "uncertainties": "\n".join("- " + x for x in summary["uncertainties"]),
             },

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ from .markdown import (
     compose,
     compose_export,
     image_link,
+    read_frontmatter,
     render_body,
     split_note,
 )
@@ -72,9 +74,13 @@ class Plan:
     records: dict[str, dict[str, Any]]
     summary: dict[str, Any] | None
     fresh: list[tuple[Slide, str]] = field(default_factory=list)
+    # Slides identical to one in `fresh` (dividers, duplicates): one AI call serves them all.
+    twins: list[tuple[Slide, str]] = field(default_factory=list)
     skipped: dict[str, str] = field(default_factory=dict)
     reused: int = 0
     warnings: list[str] = field(default_factory=list)
+    # Slides this run may send to AI (`--slides` / `--section`; all of them otherwise).
+    selected: set[str] = field(default_factory=set)
 
     def stale(self, slide_id: str) -> bool:
         return bool(self.records[slide_id]["contentKey"] != self.contents[slide_id])
@@ -86,6 +92,10 @@ class Plan:
 
     def summary_keys(self) -> list[list[Any]]:
         return [[s.number, self.records[s.slide_id]["key"]] for s in self.current()]
+
+    def summary_stale(self) -> bool:
+        """The saved summary cites slide numbers or explanations that have since changed."""
+        return self.summary is not None and self.summary.get("slideKeys") != self.summary_keys()
 
 
 def _record(hit: dict[str, Any], key: str, content: str) -> dict[str, Any]:
@@ -104,7 +114,7 @@ def _context_properties(plan: Plan) -> dict[str, Any]:
     records, summary = plan.records, plan.summary
     with_context = [s for s in plan.included if s.slide_id in records]
     stale = [s.number for s in with_context if plan.stale(s.slide_id)]
-    summary_stale = summary is not None and summary.get("slideKeys") != plan.summary_keys()
+    summary_stale = plan.summary_stale()
     if not with_context and not summary:
         return {"contextStatus": "not-generated"}
     if stale or summary_stale:
@@ -166,17 +176,66 @@ def _body(target: Target, plan: Plan, profile: ContextProfile, off_slide: str) -
         off_slide=off_slide,
         contexts=contexts,
         summary=summary,
+        summary_stale=plan.summary_stale(),
         skipped=plan.skipped,
     )
 
 
+def _summary_decision(
+    plan: Plan, generator: Generator, assets: Path, limits: dict[str, Any]
+) -> dict[str, Any]:
+    """What to do about the presentation summary, before or after the slides are explained."""
+    pending = {slide.slide_id: key for slide, key in [*plan.fresh, *plan.twins]}
+    entries: list[tuple[Slide, str]] = []
+    for slide in plan.included:
+        sid = slide.slide_id
+        if sid in pending:
+            entries.append((slide, pending[sid]))
+        elif sid in plan.records and not plan.stale(sid):
+            entries.append((slide, plan.records[sid]["key"]))
+    if not entries:
+        return {"action": "none"}
+    keys = [[slide.number, key] for slide, key in entries]
+    key = generator.key("deck", digest(payload_text(keys).encode("utf-8")))
+    decision: dict[str, Any] = {"key": key, "keys": keys, "slides": [s for s, _ in entries]}
+    if cached(assets, "deck", key) is not None:
+        return {**decision, "action": "reuse"}
+    if any(slide.slide_id not in plan.selected for slide, _ in entries):
+        # Explanations of slides outside this run's selection are never sent anywhere.
+        return {
+            **decision,
+            "action": "skip",
+            "reason": "Presentation summary not refreshed: it would send explanations of slides "
+            "outside --slides/--section. Run --context without them to refresh it.",
+        }
+    analyses = []
+    for slide, slide_key in entries:
+        saved = cached(assets, "slide", slide_key)
+        if saved is None:
+            return {**decision, "action": "call"}  # known only after the slides are explained
+        analyses.append({"slide": slide.number, "title": slide.title, **saved["data"]})
+    payload = payload_text({"slides": analyses})
+    if len(payload) > limits["max_input_chars"]:
+        return {
+            **decision,
+            "action": "skip",
+            "reason": f"Presentation summary skipped: slide explanations need {len(payload):,} "
+            f"characters; generation.limits.max_input_chars={limits['max_input_chars']:,}",
+        }
+    return {**decision, "action": "call", "payload": payload}
+
+
 def _generate(
-    target: Target, plan: Plan, generator: Generator, limits: dict[str, Any]
-) -> tuple[int, int]:
+    target: Target,
+    plan: Plan,
+    generator: Generator,
+    limits: dict[str, Any],
+    progress: dict[str, int],
+) -> int:
     """Render and analyze the slides without a saved result, then the summary if it changed."""
     assets = assets_dir(target.note)
     deck = plan.deck
-    calls = generated = 0
+    generated = 0
     if plan.fresh:
         data = target.source.read_bytes()
         if digest(data) != deck.source_sha256:
@@ -192,59 +251,60 @@ def _generate(
         for slide, key in plan.fresh:
             LOGGER.info("Generating context for slide %d.", slide.number)
             folder = result_dir(assets, "slide", key)
+            progress["aiCalls"] += 1  # counted when the provider is called, even if it fails
             generator.generate(
                 "slide", plan.payloads[slide.slide_id], images[slide.number], folder, key
             )
-            calls += 1
             generated += 1
             hit = cached(assets, "slide", key)
             if hit is None:
                 raise NoteError(f"Saved AI result for slide {slide.number} cannot be read back")
             plan.records[slide.slide_id] = _record(hit, key, plan.contents[slide.slide_id])
-    current = plan.current()
-    if not current:
+        for slide, key in plan.twins:
+            hit = cached(assets, "slide", key)
+            if hit is not None:
+                plan.records[slide.slide_id] = _record(hit, key, plan.contents[slide.slide_id])
+    decision = _summary_decision(plan, generator, assets, limits)
+    if decision["action"] == "none":
         plan.summary = None
-        return calls, generated
-    keys = plan.summary_keys()
-    key = generator.key("deck", digest(payload_text(keys).encode("utf-8")))
-    hit = cached(assets, "deck", key)
-    if hit is None:
-        analyses = []
-        for slide in current:
-            saved = cached(assets, "slide", plan.records[slide.slide_id]["key"])
-            if saved is not None:
-                analyses.append({"slide": slide.number, "title": slide.title, **saved["data"]})
-        payload = payload_text({"slides": analyses})
-        if len(payload) > limits["max_input_chars"]:
-            plan.summary = None
-            plan.warnings.append(
-                f"Presentation summary skipped: slide explanations need {len(payload):,} "
-                f"characters; generation.limits.max_input_chars={limits['max_input_chars']:,}"
-            )
-            return calls, generated
-        LOGGER.info("Generating the presentation summary from %d slide(s).", len(analyses))
+        return generated
+    if decision["action"] == "skip":
+        # An earlier summary stays in the note and is marked as out of date.
+        plan.warnings.append(decision["reason"])
+        return generated
+    key = decision["key"]
+    if decision["action"] == "call":
+        LOGGER.info(
+            "Generating the presentation summary from %d slide(s).", len(decision["slides"])
+        )
+        progress["aiCalls"] += 1
         generator.generate(
             "deck",
-            payload,
+            decision["payload"],
             None,
             result_dir(assets, "deck", key),
             key,
-            allowed_slides={s.number for s in current},
+            allowed_slides={s.number for s in decision["slides"]},
         )
-        calls += 1
-        hit = cached(assets, "deck", key)
-        if hit is None:
-            raise NoteError("Saved AI summary cannot be read back")
+    hit = cached(assets, "deck", key)
+    if hit is None:
+        raise NoteError("Saved AI summary cannot be read back")
     plan.summary = {
         **_record(hit, key, ""),
-        "slideKeys": keys,
+        "slideKeys": decision["keys"],
         "sourceFingerprint": deck.content_fingerprint,
     }
-    return calls, generated
+    return generated
 
 
-def process(target: Target, config: dict[str, Any], options: Options) -> dict[str, Any]:
+def process(
+    target: Target,
+    config: dict[str, Any],
+    options: Options,
+    progress: dict[str, int] | None = None,
+) -> dict[str, Any]:
     """Create or update one note. Raises NoteError; the caller turns it into a result row."""
+    progress = progress if progress is not None else {"aiCalls": 0}
     extraction, generation = config["extraction"], config["generation"]
     limits = generation["limits"]
     profile = load_profile(generation)
@@ -253,6 +313,8 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
         raise ConfigError("Output must be a separate .md file")
     LOGGER.info("Reading %s", source.name)
     deck = read_deck(source, extraction)
+    # Fail on unusable document properties before anything is rendered or sent.
+    document = source_properties(deck.metadata, source.stem, target.term_format)
     included = [s for s in deck.slides if extraction["include_hidden"] or not s.hidden]
     if not included:
         raise NoteError("Every slide is hidden; set extraction.include_hidden to include them")
@@ -260,22 +322,36 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
         select(deck, included, options.slides, options.sections) if options.context else included
     )
     assets = assets_dir(note)
+    identity = (target.identity.get("sourceId") or os.path.normcase(str(source))).lower()
     state = load_state(assets)
+    if state and state.get("identity") != identity:
+        # Results saved for another presentation must never appear in this note.
+        state = {}
     existing = note.read_text("utf-8-sig") if note.exists() else None
     old_meta: dict[str, Any] = {}
     before, after, old_body = "\n", "\n\n" + profile.labels["personal"] + "\n", None
-    if existing is not None and not target.proxy and not options.force:
-        raise NoteError(f"Output already exists; use --force to replace it: {note}")
+    if existing is not None and not target.proxy:
+        if not options.force:
+            raise NoteError(f"Output already exists; use --force to replace it: {note}")
+        try:
+            written_by_export = read_frontmatter(existing)[0].get("type") == EXPORT_TYPE
+        except NoteError:
+            written_by_export = False
+        if not written_by_export:
+            raise NoteError(
+                f"Output exists and was not written by export; choose another --output: {note}"
+            )
     if existing is not None and target.proxy:
         old_meta, before, old_body, after = split_note(existing)
-        if old_meta.get("sourceId") != target.identity["sourceId"]:
+        if str(old_meta.get("sourceId", "")).lower() != identity:
             raise NoteError("The existing note belongs to another presentation; it was not changed")
 
     payloads = {
         s.slide_id: payload_text(slide_payload(s, deck, extraction["off_slide"])) for s in included
     }
     contents = {
-        s.slide_id: content_key(s, payloads[s.slide_id], limits["image_width"]) for s in included
+        s.slide_id: content_key(s, payloads[s.slide_id], limits["image_width"], deck)
+        for s in included
     }
     plan = Plan(
         deck,
@@ -284,6 +360,7 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
         contents,
         {sid: dict(r) for sid, r in state.get("slides", {}).items() if sid in contents},
         dict(state["deck"]) if state.get("deck") else None,
+        selected={s.slide_id for s in chosen},
     )
     off_slide = extraction["off_slide"]
     edited = False
@@ -313,6 +390,9 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
                     f"evidence needs {len(payloads[sid]):,} characters; "
                     f"generation.limits.max_input_chars={limits['max_input_chars']:,}"
                 )
+            elif any(key == other for _, other in plan.fresh):
+                plan.twins.append((slide, key))
+                plan.reused += 1
             else:
                 plan.fresh.append((slide, key))
         if len(plan.fresh) > limits["max_slides"]:
@@ -321,17 +401,7 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
                 f"{limits['max_slides']}. Select fewer with --slides or raise --max-slides. "
                 "No AI was called."
             )
-        fresh_keys = {slide.slide_id: key for slide, key in plan.fresh}
-        after_run = []
-        for slide in included:
-            sid = slide.slide_id
-            if sid in fresh_keys:
-                after_run.append([slide.number, fresh_keys[sid]])
-            elif sid in plan.records and not plan.stale(sid):
-                after_run.append([slide.number, plan.records[sid]["key"]])
-        if after_run:
-            summary_key = generator.key("deck", digest(payload_text(after_run).encode("utf-8")))
-            summary_call = cached(assets, "deck", summary_key) is None
+        summary_call = _summary_decision(plan, generator, assets, limits)["action"] == "call"
         if plan.fresh:
             preflight()
             check_renderable(source.read_bytes())
@@ -358,10 +428,10 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
         return {"status": would, **row}
 
     def finish() -> dict[str, Any]:
-        calls = generated = 0
+        generated = 0
         if generator is not None and (not options.dry_run or not planned):
             # With nothing left to send, this only attaches results saved earlier.
-            calls, generated = _generate(target, plan, generator, limits)
+            generated = _generate(target, plan, generator, limits, progress)
         body = _body(target, plan, profile, off_slide)
         properties = _context_properties(plan)
         if target.proxy:
@@ -369,7 +439,7 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
             metadata.update(
                 type=PROXY_TYPE,
                 schemaVersion=PROXY_SCHEMA,
-                **source_properties(deck.metadata, source.stem, target.term_format),
+                **document,
                 **target.identity,
                 sourceFullPath=str(source),
                 **properties,
@@ -391,7 +461,7 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
             metadata = {
                 "type": EXPORT_TYPE,
                 "schemaVersion": EXPORT_SCHEMA,
-                **source_properties(deck.metadata, source.stem),
+                **document,
                 "sourceFileName": source.name,
                 "sourceFullPath": str(source),
                 "sourceSnapshotSha256": deck.source_sha256,
@@ -404,7 +474,7 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
         result = {
             "status": status,
             **row,
-            "aiCalls": calls,
+            "aiCalls": progress["aiCalls"],
             "plannedAiCalls": 0 if not options.dry_run else planned,
             "generatedSlides": generated,
             "contextStatus": properties["contextStatus"],
@@ -420,9 +490,11 @@ def process(target: Target, config: dict[str, Any], options: Options) -> dict[st
         if status != "unchanged":
             if edited and existing is not None:
                 result["backupPath"] = str(backup(note, existing))
-            atomic_write(note, text)
+            # A note that appeared meanwhile (an editor, a sync tool) is never overwritten.
+            atomic_write(note, text, overwrite=existing is not None)
         if target.proxy or plan.records or plan.summary:
             new_state = {
+                "identity": identity,
                 "source": {
                     "path": str(source),
                     "sha256": deck.source_sha256,
@@ -459,14 +531,17 @@ def _attempt(target: Target, config: dict[str, Any], options: Options) -> dict[s
     if target.proxy:
         labels = {"sourceRoot": target.identity["sourceRoot"], **labels}
         labels["presentationPath"] = str(target.source)
+    progress = {"aiCalls": 0}
     try:
-        return {**labels, **process(target, config, options)}
+        return {**labels, **process(target, config, options, progress)}
     except (NoteError, OSError) as exc:
         LOGGER.error("%s: %s", target.source.name, exc)
         return {
             **labels,
             "status": "error" if target.proxy else "export-error",
             "message": str(exc),
+            # Calls made before the failure used quota and stay visible.
+            "aiCalls": progress["aiCalls"],
         }
 
 
@@ -529,6 +604,10 @@ def export(
         if not sources:
             raise ConfigError(f"No .pptx or .pptm files found in: {path}")
     elif path.is_file():
+        if path.suffix.lower() not in SUFFIXES:
+            raise ConfigError(f"Input must be a .pptx or .pptm file or a folder: {path}")
+        if output is not None and output.suffix.lower() != ".md":
+            raise ConfigError(f"--output must be a .md file: {output}")
         sources = [path]
     else:
         raise ConfigError(f"Input does not exist: {path}")

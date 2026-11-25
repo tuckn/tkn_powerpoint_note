@@ -26,13 +26,14 @@ def test_create_never_overwrites_racing_file(tmp_path, monkeypatch):
     import os
 
     path = tmp_path / "config.yaml"
-    original = os.link
+    name = "rename" if os.name == "nt" else "link"
+    original = getattr(os, name)
 
     def race(source, destination):
         path.write_text("human edit", encoding="utf-8")
         return original(source, destination)
 
-    monkeypatch.setattr(os, "link", race)
+    monkeypatch.setattr(os, name, race)
     with pytest.raises(FileExistsError):
         atomic_write(path, "generated", overwrite=False)
     assert path.read_text("utf-8") == "human edit"

@@ -205,6 +205,7 @@ tkn-powerpoint-note presentation list-slides --presentation "C:\path\to\deck.ppt
 超える場合は AI を呼ぶ前に止まり、対象を勝手に切り詰めません。
 `--max-slides` で上限を変えるか、`--slides` で範囲を分けて実行します。
 説明の済んだスライドは再利用するため、上限には数えません。
+範囲を分けた場合、資料の要約は、最後に `--slides` を付けずに実行したときに全体の分を作ります（「[資料の要約を作り直す条件](docs/guides/slide-context.md#資料の要約を作り直す条件)」）。
 
 画像化には、デスクトップ版 PowerPoint を裏で起動します。
 PowerPoint の一時コピーを開いて描画するため、元のファイルや作業中の PowerPoint は変更しません。
@@ -218,6 +219,7 @@ Markdown を移動・共有するときは、`img/` も一緒に扱ってくだ�
 
 既存の Markdown は、既定では上書きしません。
 同じ出力先に書き出し直す場合は `--force` を指定します。
+`--force` で置き換えるのは、`export` が書き出した Markdown だけです。代理ノートやほかの Markdown は、`--force` を付けても置き換えません。
 `--context` を付けて書き出し直すと、内容の変わっていないスライドの説明は再利用します。
 
 ```shell
