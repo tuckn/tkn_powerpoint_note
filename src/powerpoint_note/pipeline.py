@@ -24,7 +24,7 @@ from .frontmatter import (
     source_properties,
     timestamp,
 )
-from .io import atomic_write, digest
+from .io import absolute, atomic_write, digest
 from .markdown import (
     body_digest,
     compose,
@@ -81,6 +81,8 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
     # Slides this run may send to AI (`--slides` / `--section`; all of them otherwise).
     selected: set[str] = field(default_factory=set)
+    # Saved slide results already read in this run, by key.
+    hits: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def stale(self, slide_id: str) -> bool:
         return bool(self.records[slide_id]["contentKey"] != self.contents[slide_id])
@@ -96,6 +98,16 @@ class Plan:
     def summary_stale(self) -> bool:
         """The saved summary cites slide numbers or explanations that have since changed."""
         return self.summary is not None and self.summary.get("slideKeys") != self.summary_keys()
+
+
+def _slide_hit(plan: Plan, assets: Path, key: str) -> dict[str, Any] | None:
+    """A saved slide result, read from disk once per run."""
+    if key not in plan.hits:
+        hit = cached(assets, "slide", key)
+        if hit is None:
+            return None
+        plan.hits[key] = hit
+    return plan.hits[key]
 
 
 def _record(hit: dict[str, Any], key: str, content: str) -> dict[str, Any]:
@@ -147,7 +159,7 @@ def _body(target: Target, plan: Plan, profile: ContextProfile, off_slide: str) -
     contexts: dict[str, dict[str, Any]] = {}
     for slide in plan.included:
         record = plan.records.get(slide.slide_id)
-        hit = cached(assets, "slide", record["key"]) if record else None
+        hit = _slide_hit(plan, assets, record["key"]) if record else None
         if hit is None:
             plan.records.pop(slide.slide_id, None)
             continue
@@ -195,7 +207,7 @@ def _summary_decision(
             sid in plan.records
             and not plan.stale(sid)
             # A record whose saved result is gone cannot be summarized or shown.
-            and cached(assets, "slide", plan.records[sid]["key"]) is not None
+            and _slide_hit(plan, assets, plan.records[sid]["key"]) is not None
         ):
             entries.append((slide, plan.records[sid]["key"]))
     if not entries:
@@ -215,7 +227,7 @@ def _summary_decision(
         }
     analyses = []
     for slide, slide_key in entries:
-        saved = cached(assets, "slide", slide_key)
+        saved = _slide_hit(plan, assets, slide_key)
         if saved is None:
             return {**decision, "action": "call"}  # known only after the slides are explained
         analyses.append({"slide": slide.number, "title": slide.title, **saved["data"]})
@@ -264,17 +276,23 @@ def _generate(
                 # Counted once the provider was called, even when the call or its output fails.
                 progress["aiCalls"] = generator.calls
             generated += 1
-            hit = cached(assets, "slide", key)
+            hit = _slide_hit(plan, assets, key)
             if hit is None:
                 raise NoteError(f"Saved AI result for slide {slide.number} cannot be read back")
             plan.records[slide.slide_id] = _record(hit, key, plan.contents[slide.slide_id])
         for slide, key in plan.twins:
-            hit = cached(assets, "slide", key)
+            hit = _slide_hit(plan, assets, key)
             if hit is not None:
                 plan.records[slide.slide_id] = _record(hit, key, plan.contents[slide.slide_id])
     decision = _summary_decision(plan, generator, assets, limits)
     if decision["action"] == "none":
-        plan.summary = None
+        if not plan.records:
+            plan.summary = None
+        elif plan.summary is not None:
+            # Explanations remain in the note as out of date; so does their summary.
+            plan.warnings.append(
+                "Presentation summary not refreshed: no slide has a current explanation"
+            )
         return generated
     if decision["action"] == "skip":
         # An earlier summary stays in the note and is marked as out of date.
@@ -338,12 +356,16 @@ def process(
     identity = (
         _note_identity(target.identity["sourceId"])
         if target.proxy
-        else os.path.normcase(str(source))
+        # The same file named through a link or junction is still the same presentation.
+        else os.path.normcase(os.path.realpath(source))
     )
     state = load_state(assets)
     if state and state.get("identity") != identity:
         # Results saved for another presentation must never appear in this note.
         state = {}
+    if note.is_symlink():
+        # Replacing the file would replace the link and leave its target out of date.
+        raise NoteError(f"The note path is a link; name the file it points to: {note}")
     existing = note.read_text("utf-8-sig") if note.exists() else None
     old_meta: dict[str, Any] = {}
     before, after, old_body = "\n", "\n\n" + profile.labels["personal"] + "\n", None
@@ -398,7 +420,7 @@ def process(
         for slide in chosen:
             sid = slide.slide_id
             key = generator.key("slide", contents[sid])
-            hit = cached(assets, "slide", key)
+            hit = _slide_hit(plan, assets, key)
             if hit is not None:
                 plan.records[sid] = _record(hit, key, contents[sid])
                 plan.reused += 1
@@ -617,7 +639,7 @@ def export(
 ) -> dict[str, Any]:
     """Write `<file>.md` beside each presentation, or one file to --output."""
     # Keep paths as the user wrote them: folders reached through links stay as given.
-    path = Path(os.path.abspath(path.expanduser()))
+    path = absolute(path.expanduser())
     if path.is_dir():
         if output is not None:
             raise ConfigError("--output cannot be used when the input is a folder")
@@ -639,7 +661,7 @@ def export(
     rows = []
     for source in sources:
         note = (
-            Path(os.path.abspath(output.expanduser()))
+            absolute(output.expanduser())
             if output is not None
             else source.with_name(source.name + ".md")
         )
@@ -655,7 +677,7 @@ def export(
 
 
 def list_slides(path: Path, config: dict[str, Any]) -> dict[str, Any]:
-    path = Path(os.path.abspath(path.expanduser()))
+    path = absolute(path.expanduser())
     deck = read_deck(path, config["extraction"])
     return {
         "status": "success",

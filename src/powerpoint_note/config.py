@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import importlib
 import math
-import os
 import re
 from importlib.resources import files
 from pathlib import Path
@@ -14,7 +13,7 @@ from typing import Any
 import yaml
 
 from .context_profiles import load_profile
-from .io import atomic_write
+from .io import absolute, atomic_write
 from .models import ConfigError
 
 APPLICATION_ID = "powerpoint_note"
@@ -300,7 +299,7 @@ def _complete_sources(sources: dict[str, Any], cwd: Path) -> dict[str, Any]:
         _merge(item, spec)
         for group in ("presentations", "notes"):
             # Absolute, but not resolved: a folder reached through a link keeps the given path.
-            item[group]["dir"] = os.path.abspath(cwd / Path(item[group]["dir"]).expanduser())
+            item[group]["dir"] = str(absolute(cwd / Path(item[group]["dir"]).expanduser()))
         completed[identifier] = item
     return completed
 

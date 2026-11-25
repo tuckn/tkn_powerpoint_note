@@ -531,3 +531,49 @@ def test_a_missing_saved_result_does_not_break_the_summary(source, ai):
     row = one(source, context=True, overrides={"generation": {"limits": {"max_input_chars": 100}}})
     assert row["status"] == "updated" and len(row["skippedSlides"]) == 1
     assert row["aiCalls"] == 0 and "summary skipped" in row["warnings"][0]
+
+
+def test_the_same_presentation_named_through_a_junction_keeps_its_explanations(
+    source, ai, tmp_path
+):
+    folder = tmp_path / "real"
+    folder.mkdir()
+    deck = make_deck(folder / "talk.pptx", SLIDES)
+    alias = tmp_path / "alias"
+    junction(alias, folder)
+    config = source["load"]()
+    assert export(deck, None, config, Options(context=True))["aiCalls"] == 4
+    again = export(alias / "talk.pptx", None, config, Options(force=True, context=True, slides="1"))
+    row = again["results"][0]
+    assert (row["status"], row["aiCalls"], row["reusedSlides"]) == ("exported", 0, 1)
+    text = (folder / "talk.pptx.md").read_text("utf-8")
+    assert text.count("Explained") == 3 and "Deck summary" in text
+    assert len(list((folder / "img" / "talk.pptx" / "slides").iterdir())) == 3
+
+
+def test_a_note_that_is_a_link_is_not_replaced(source, tmp_path):
+    deck = make_deck(tmp_path / "talk.pptx", SLIDES)
+    real = tmp_path / "real.md"
+    config = source["load"]()
+    export(deck, real, config, Options())
+    link = tmp_path / "link.md"
+    try:
+        link.symlink_to(real)
+    except OSError:
+        pytest.skip("creating symbolic links needs a privilege on this machine")
+    before = real.read_text("utf-8")
+    row = export(deck, link, config, Options(force=True))["results"][0]
+    assert row["status"] == "export-error" and "is a link" in row["message"]
+    assert link.is_symlink() and real.read_text("utf-8") == before
+
+
+def test_the_summary_stays_when_every_slide_result_went_missing(source, ai):
+    make_deck(source["decks"] / "deck.pptx", SLIDES)
+    one(source, context=True)
+    assets = assets_dir(note_of(source))
+    for response in (assets / "slides").glob("*/response.json"):
+        response.unlink()
+    row = one(source, context=True, overrides={"generation": {"limits": {"max_input_chars": 100}}})
+    assert row["status"] == "updated" and len(row["skippedSlides"]) == 3 and row["aiCalls"] == 0
+    assert "Deck summary" in note_of(source).read_text("utf-8")
+    assert len(list((assets / "deck").iterdir())) == 1

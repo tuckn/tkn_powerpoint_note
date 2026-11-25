@@ -27,6 +27,15 @@ def fingerprint(value: Any) -> str:
     return digest(json_text(value).encode("utf-8"))
 
 
+def absolute(path: Path) -> Path:
+    """Absolute without resolving links, so a folder reached through a link keeps its name.
+
+    `..` is folded only on Windows, where the system folds it the same way before following
+    links. Elsewhere `link/..` means the parent of the link's target and must stay as written.
+    """
+    return Path(os.path.abspath(path)) if os.name == "nt" else path.absolute()
+
+
 def atomic_write(path: Path, text: str, *, overwrite: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)

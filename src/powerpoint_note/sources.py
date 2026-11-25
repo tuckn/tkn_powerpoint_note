@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .extract import SUFFIXES
 from .frontmatter import PROXY_TYPE
+from .io import absolute
 from .markdown import read_frontmatter
 from .models import ConfigError, NoteError
 
@@ -53,27 +53,25 @@ def resolve_file(spec: dict[str, Any], value: Path, known: list[str]) -> str:
     """One presentation named on the command line, relative to or inside presentations.dir."""
     root = Path(spec["presentations"]["dir"])
     path = value.expanduser()
-    path = Path(os.path.abspath(path if path.is_absolute() else root / path))
-    # Compare as written first; then through the real folders, so another name for the same
-    # folder (a link or junction on the way) also matches. The file itself is never resolved:
-    # a link placed inside the folder counts as a file of the folder, as in the folder scan.
-    candidates = (
-        (path, Path(os.path.abspath(root))),
-        (path.parent.resolve() / path.name, root.resolve()),
-    )
-    relative = None
-    for candidate, base in candidates:
-        try:
-            relative = candidate.relative_to(base).as_posix()
-            break
-        except ValueError:
-            continue
-    if relative is None:
+    path = absolute(path if path.is_absolute() else root / path)
+    # The same folder can be named with or without the links on the way to it. Try the path
+    # and the folder both as written and through the real folders. The file itself is never
+    # resolved: a link placed inside the folder counts as a file of the folder, as in the scan.
+    relatives = []
+    for candidate in (path, path.parent.resolve() / path.name):
+        for base in (absolute(root), root.resolve()):
+            try:
+                relatives.append(candidate.relative_to(base).as_posix())
+            except ValueError:
+                continue
+    if not relatives:
         raise ConfigError(f"Presentation is outside presentations.dir: {path}")
-    match = next((item for item in known if item.lower() == relative.lower()), None)
+    wanted = {relative.lower() for relative in relatives}
+    match = next((item for item in known if item.lower() in wanted), None)
     if match is None:
         raise ConfigError(
-            f"Presentation is not in this source (check recursive, include and ignore): {relative}"
+            "Presentation is not in this source (check recursive, include and ignore): "
+            + relatives[0]
         )
     return match
 
